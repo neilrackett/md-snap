@@ -27,6 +27,24 @@ void display_termChar(const uint8_t col, const uint8_t row, const char chr) {
       (DISPLAY_TERM_FIRST_ROW_OFFSET + row) * DISPLAY_TERM_CHAR_HEIGHT, chr);
 }
 
+void display_termCharInverse(const uint8_t col, const uint8_t row,
+                             const char chr) {
+  if ((col >= maxCol) || (row >= maxRow)) {
+    return;
+  }
+
+  // Reverse video: fill the cell (same geometry as the block cursor, which
+  // covers a character cell), then punch the glyph out in the background colour.
+  u8g2_DrawBox(display_getU8g2Ref(), col * DISPLAY_TERM_CHAR_WIDTH,
+               (DISPLAY_TERM_CURSOR_ROW_OFFSET + row) * DISPLAY_TERM_CHAR_HEIGHT,
+               DISPLAY_TERM_CHAR_WIDTH, DISPLAY_TERM_CHAR_HEIGHT);
+  u8g2_SetDrawColor(display_getU8g2Ref(), 0);
+  u8g2_DrawGlyph(
+      display_getU8g2Ref(), col * DISPLAY_TERM_CHAR_WIDTH,
+      (DISPLAY_TERM_FIRST_ROW_OFFSET + row) * DISPLAY_TERM_CHAR_HEIGHT, chr);
+  u8g2_SetDrawColor(display_getU8g2Ref(), 1);
+}
+
 void display_termCursor(const uint8_t col, const uint8_t row) {
   if ((col >= maxCol) || (row >= maxRow)) {
     return;

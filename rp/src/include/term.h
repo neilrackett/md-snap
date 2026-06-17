@@ -9,7 +9,9 @@
 #ifndef TERM_H
 #define TERM_H
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include "pico.h"
 #include "tprotocol.h"
@@ -76,6 +78,20 @@ typedef struct {
   const char *command;
   void (*handler)(const char *arg);
 } Command;
+
+/**
+ * @brief Raw keystroke interceptor.
+ *
+ * Receives every keystroke (ASCII, ST scan code, shift state) before the line
+ * editor. Return true to consume the key (the terminal line editor is then
+ * skipped). Used by single-key UIs such as the screenshots menu.
+ */
+typedef bool (*term_rawkey_cb_t)(char ascii, uint8_t scanCode, uint8_t shift);
+
+/**
+ * @brief Install (or clear, with NULL) the raw keystroke interceptor.
+ */
+void term_setRawKeyCallback(term_rawkey_cb_t cb);
 
 /**
  * @brief chandler callback that publishes a parsed protocol command

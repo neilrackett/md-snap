@@ -2,9 +2,10 @@ name: Release
 
 on:
   push:
+    branches:
+      - __disabled__
     tags:
-      - 'v*'
-  workflow_dispatch:
+      - __disabled__
 
 permissions:
   contents: write
@@ -96,7 +97,7 @@ jobs:
 
         s3 = boto3.client('s3')
         release_dir = 'release'
-        bucket_name = 'atarist.sidecartridge.com'
+        bucket_name = 'atarist.neilrackett.com'
 
         for filename in os.listdir(release_dir):
             local_path = os.path.join(release_dir, filename)

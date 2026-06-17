@@ -96,6 +96,20 @@ APP_TERMINAL 				equ $0 ; The terminal app
 APP_TERMINAL_START   		equ $0 ; Start terminal command
 APP_TERMINAL_KEYSTROKE 		equ $1 ; Keystroke command
 
+; MD/Snap screenshot commands (m68k -> RP). The resident VBL grabber in
+; userfw.s pushes the captured screen out the ROM3 window using these.
+APP_SCREENSHOT_BEGIN		equ $10 ; metadata: rez (d3) + machine type (d4) + 16 palette words (buffer)
+APP_SCREENSHOT_DATA			equ $11 ; one screen chunk; d3 = chunk index, buffer = SHOT_CHUNK_SIZE bytes
+SHOT_CHUNK_SIZE				equ 2000 ; bytes per chunk (<= protocol payload cap of 2048)
+SHOT_NUM_CHUNKS				equ 16   ; 16 * 2000 = 32000 bytes (a full ST screen)
+SHOT_SCREEN_SIZE			equ 32000
+
+; CAPTURE_SEQ: the RP bumps the LSB of shared-var slot 3 on each SELECT
+; short-press; the resident VBL grabber polls this byte and captures when
+; it changes. Slot 3 base = SHARED_VARIABLES + 3*4 = $FA201C; the value is
+; stored big-endian, so the LSB is at +3 ($FA201F).
+CAPTURE_SEQ_ADDR			equ (SHARED_VARIABLES + (3 * 4) + 3)	; $FA201F
+
 _dskbufp                equ $4c6                            ; Address of the disk buffer pointer    
 
 
@@ -152,15 +166,12 @@ check_keys			macro
 
 					gemdos	Cnecin,2		; Read the key pressed
 
-					cmp.b #27, d0		; Check if the key is ESC
-					beq .\@esc_key	; If it is, send terminal command
-
+					; MD/Snap has no legacy command-line terminal: every key
+					; (including ESC) is forwarded as a keystroke so the RP menu
+					; handler can act on it. ESC -> exit to desktop is handled
+					; RP-side in menuKeyCb.
 					move.l d0, d3
 					send_sync APP_TERMINAL_KEYSTROKE, 4
-
-					bra .\@no_key
-.\@esc_key:
-					send_sync APP_TERMINAL_START, 0
 
 .\@no_key:
 
@@ -180,8 +191,10 @@ check_commands		macro
 					cmp.l #CMD_BOOT_GEM, d6		; Check if the command is to boot GEM
 					beq boot_gem				; If it is, boot GEM
 					cmp.l #CMD_START, d6		; Check if the command hands over to USERFW
-					beq rom_function			; If it is, jump to the user firmware dispatcher
-
+					bne.s .\@no_start			; If not, fall through to the NOP/keys path
+					bsr rom_function			; Install the resident grabber, then return
+					bra .\@bypass
+.\@no_start:
 					; If we are here, the command is a NOP
 					; If the command is a NOP, check the shift keys to bypass the command
 					; check_shift_keys
@@ -324,23 +337,62 @@ start_rom_code:
 	jmp (a0)
 	nop
 
+GEMDOS_Cconws		equ 9	; trap #1 -> print null-terminated string
+
 boot_gem:
-	; If we get here, continue loading GEM
-    rts
+	; (Re)install the resident grabber before booting to the desktop. boot_gem
+	; runs on EVERY boot -- including after an ST reset, where the sentinel is
+	; still latched at CMD_BOOT_GEM so check_commands comes straight here and the
+	; CMD_START path (which normally installs) never runs. rom_function is
+	; idempotent (userfw_installed guard, freshly zero in the relocated RAM copy
+	; after a reset), so this installs once per boot. bsr/rts is stack-balanced,
+	; so the final rts below still unwinds the print loop back to TOS.
+	bsr rom_function
+	; Print the exit banner via the VT52 console, then return to TOS to continue
+	; booting to the GEM desktop. boot_gem is reached via a beq from
+	; check_commands inside the print loop, at the same stack level as the
+	; CA_INIT return address, so this rts unwinds the print loop -- printing here
+	; means the framebuffer copy stops right after, so the banner persists.
+	lea bg_msg(pc), a0
+	move.l a0, -(sp)
+	move.w #GEMDOS_Cconws, -(sp)
+	trap #1
+	addq.l #6, sp
+	rts
+bg_msg:
+	dc.b 27,"E","Press SELECT to take a screenshot",13,10,13,10,0
+	even
 
 ; Dispatcher for the user firmware module. Reached on CMD_START via the
-; sentinel poll in check_commands. The cartridge image places userfw.s
-; at offset $0800 (USERFW = $FA0800) through target/atarist/src/userfw.ld;
-; main.s simply hands control over with a one-way jmp. Apps that want
-; to chain multiple modules can change this to a sequence of jsr / jmp
-; the same way md-drives-emulator's rom_function dispatches into
-; GEMDRIVE/FLOPPYEMUL/ACSIEMUL/RTCEMUL.
+; sentinel poll in check_commands, and again from boot_gem. The cartridge
+; image places userfw.s at offset $0800 (USERFW = $FA0800) through
+; target/atarist/src/userfw.ld. The installer must run exactly once: the
+; CMD_START sentinel stays set for several frames (the RP holds it), so guard
+; with a flag. The flag lives in this relocated-to-RAM code, reached
+; PC-relative so the write lands in RAM (the cartridge ROM region is read-only
+; to the ST; an absolute write would bus-error).
 rom_function:
-    jmp USERFW
+    lea     userfw_installed(pc), a0
+    tst.l   (a0)
+    bne.s   .rf_done
+    move.l  #1, (a0)
+    movem.l d0-d2/a0-a2, -(sp)
+    jsr     USERFW              ; installer executes from ROM (fetch/reads OK)
+    movem.l (sp)+, d0-d2/a0-a2
+.rf_done:
+    rts
+
+userfw_installed:
+    dc.l    0
 
 ; Shared functions included at the end of the file
 ; Don't forget to include the macros for the shared functions at the top of file
     include "inc/sidecart_functions.s"
+
+; Export the write transport so the resident grabber in userfw.s (which runs
+; from a Malloc'd RAM copy, too far for a PC-relative bsr) can reach the ROM
+; copy via an absolute-address jsr.
+    xdef send_sync_write_command_to_sidecart
 
 
 end_rom_code:

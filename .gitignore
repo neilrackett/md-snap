@@ -60,3 +60,4 @@ dist/
 .cache/
 .claude/
 .DS_Store
+uuid.txt

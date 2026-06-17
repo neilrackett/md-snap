@@ -115,8 +115,10 @@ target_sources(${PROJECT_NAME} PRIVATE
         gconfig.c
         hw_config.c
         network.c
+        png_writer.c
         reset.c
         romemul.c
+        screenshot.c
         sdcard.c
         select.c
         term.c

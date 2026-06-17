@@ -127,6 +127,10 @@ static const Command *commands;
 static size_t numCommands = 0;
 
 // Setter for commands and numCommands
+static term_rawkey_cb_t rawKeyCb = NULL;
+
+void term_setRawKeyCallback(term_rawkey_cb_t cb) { rawKeyCb = cb; }
+
 void term_setCommands(const Command *cmds, size_t count) {
   commands = cmds;
   numCommands = count;
@@ -178,6 +182,9 @@ static char screen[TERM_SCREEN_SIZE];
 static uint8_t cursorX = 0;
 static uint8_t cursorY = 0;
 
+// Reverse-video state, toggled by the Atari VT52 ESC p / ESC q sequences.
+static bool inverseVideo = false;
+
 static uint8_t menuRowSsid = 0;
 static uint8_t menuRowSelect = 0;
 static uint8_t menuRowSd = 0;
@@ -202,6 +209,7 @@ void term_clearScreen(void) {
   memset(screen, 0, TERM_SCREEN_SIZE);
   cursorX = 0;
   cursorY = 0;
+  inverseVideo = false;
   menuRowsValid = false;
   menuPromptValid = false;
   display_termClear();
@@ -238,7 +246,11 @@ static void termScrollUp(void) {
 // Prints a character to the screen, handles scrolling
 static void termPutChar(char chr) {
   screen[cursorY * TERM_SCREEN_SIZE_X + cursorX] = chr;
-  display_termChar(cursorX, cursorY, chr);
+  if (inverseVideo) {
+    display_termCharInverse(cursorX, cursorY, chr);
+  } else {
+    display_termChar(cursorX, cursorY, chr);
+  }
   cursorX++;
   if (cursorX >= TERM_SCREEN_SIZE_X) {
     cursorX = 0;
@@ -345,6 +357,12 @@ static void vt52ProcessSequence(const char *seq, size_t length) {
         screen[cursorY * TERM_SCREEN_SIZE_X + posX] = 0;
         display_termChar(posX, cursorY, ' ');
       }
+      break;
+    case 'p':  // Reverse video on (Atari VT52)
+      inverseVideo = true;
+      break;
+    case 'q':  // Reverse video off (Atari VT52)
+      inverseVideo = false;
       break;
     case 'Y':  // Direct cursor addressing: ESC Y <row> <col>
       if (length == 4) {
@@ -627,6 +645,11 @@ void __not_in_flash_func(term_loop)() {
         // Get the keyboard scan code from the bits 16 to 23 of the payload
         uint8_t scanCode =
             (payload32 & TERM_KEYBOARD_SCAN_MASK) >> TERM_KEYBOARD_SCAN_SHIFT;
+        // Let a single-key UI (e.g. the screenshots menu) consume the key
+        // before the line editor sees it.
+        if (rawKeyCb != NULL && rawKeyCb(keystroke, scanCode, shiftKey)) {
+          break;
+        }
         if (keystroke >= TERM_KEYBOARD_KEY_START &&
             keystroke <= TERM_KEYBOARD_KEY_END) {
           // Print the keystroke and the shift key status

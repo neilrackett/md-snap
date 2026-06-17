@@ -42,6 +42,20 @@
 void display_termChar(uint8_t col, uint8_t row, char chr);
 
 /**
+ * @brief Draws a character glyph in reverse video (inverted) at a grid
+ * position.
+ *
+ * Fills the character cell and renders the glyph in the background colour, so
+ * the cell appears as light-on-dark. Used for highlighted UI keys/labels via
+ * the Atari VT52 reverse-video escapes (ESC p / ESC q).
+ *
+ * @param col The column index where the character should be drawn.
+ * @param row The row index where the character should be drawn.
+ * @param chr The character (glyph) to be displayed inverted.
+ */
+void display_termCharInverse(uint8_t col, uint8_t row, char chr);
+
+/**
  * @brief Draws a solid block at the cursor position.
  *
  * This function renders a filled rectangular block on the display.
