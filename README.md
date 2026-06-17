@@ -19,8 +19,8 @@ It works in all ST resolutions (low, medium and high) and corrects the aspect ra
 
 ## Known limitations
 
-- Works perfectly in GEM and simple TOS apps, but may not work in some games.
-- It doesn't work for apps that bypass standard screen layout, for example apps that use overscan or sync-scrolling.
+- Works perfectly in GEM and TOS apps that don't replace VBL, but may not work in some games.
+- It doesn't work for apps that bypass standard screen layout, for example overscan or sync-scrolling.
 
 ## What's next?
 

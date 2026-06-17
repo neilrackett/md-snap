@@ -8,6 +8,79 @@ See also: `programming.md` (full shared-region table and budget rules), `README.
 
 Template for a **Sidecartridge Multi-device microfirmware app** targeting Atari ST / STE / MegaST(E). Each "app" is a UF2 image that runs on a Raspberry Pi Pico (RP2040) plugged into the Multi-device cartridge slot, emulating a ROM cartridge for the Atari while also handling networking, SD card I/O, and config. Public build/usage docs are at <https://docs.sidecartridge.com/sidecartridge-multidevice/programming/>.
 
+This repo has been turned into **MD/Snap** — see below.
+
+## MD/Snap (this app) — implementation notes
+
+MD/Snap captures the Atari ST screen to a `640×400` indexed PNG on the SD card when **SELECT** is
+pressed. Flow: boot menu lists existing `/screenshots/*.png` → **ESC** installs a resident m68k
+grabber and boots to the GEM desktop → **SELECT** captures (snapshot → push over the cartridge window
+→ RP deplanes/pixel-doubles/writes PNG → LED flash). **B** / hold-SELECT-at-boot → Booster.
+
+Key files (beyond the template): `target/atarist/src/userfw.s` (resident VBL grabber + installer),
+`rp/src/screenshot.c` (chunk assembly + deplane + palette decode), `rp/src/png_writer.c` (streaming
+indexed PNG), `rp/src/emul.c` (menu + exit-to-desktop resident service loop), plus reverse-video
+added to `term.c`/`display_term.c` and the SELECT escape hatch in `main.c`.
+
+### Hard-won gotchas (these cost real debugging time — don't relearn them)
+
+- **The command sentinel `$FA2000` is NOT auto-initialised.** `firmware.py` **zero-trims** the cartridge
+  image (it stops at the last non-zero byte, ~2.5 KB), and `COPY_FIRMWARE_TO_RAM` copies only that and
+  does **not** clear the rest of the ROM-in-RAM mirror. So `$FA2000` holds stale RP RAM until the first
+  display command. `emul.c` explicitly writes it to `CMD_NOP` right after `COPY_FIRMWARE_TO_RAM`; without
+  that the m68k can read garbage as a spurious RESET/BOOT_GEM/START and boot straight to the desktop
+  "as if the ROM wasn't there." (This invalidates the template's "padded to 64 KB" claim in the Build
+  section — it's trimmed, not padded.)
+- **Resident grabber must live in RAM.** The cartridge region `$FA0000-$FAFFFF` bus-errors on *stores*
+  (reads/exec are fine). The installer `Malloc`s a block, copies the position-independent resident
+  handler in, and hooks the **`$70` VBL autovector** (chained). The 32000-byte screen snapshot buffer
+  is the extra space `Malloc`'d past the resident block (NOT assembled into the image — that would blow
+  the 8 KB cartridge budget), reached via a stored pointer.
+- **Resident code calls the ROM transport via absolute `jsr`,** not `bsr` — a PC-relative `bsr` from
+  the RAM copy can't reach `send_sync_write_command_to_sidecart` in ROM. The symbol is `xdef`'d in
+  `main.s` and `xref`'d in `userfw.s`.
+- **Protocol payload cap is ~2048 B**, so the 32000-byte screen is pushed as 16×2000-byte chunks plus a
+  BEGIN metadata command; the grabber dribbles one chunk per VBL frame.
+- **No RTC / no wall clock:** the RP has no battery clock and we don't fetch NTP. Filenames are
+  sequential `snap_NNNN_<low|medium|high>.png` (RP scans the folder for the next free index). Do not
+  reintroduce timestamped names without a real time source.
+- **Palette decode is ST-vs-STE:** the grabber sends the `_MCH` cookie value; the RP picks 3-bit (ST)
+  or 4-bit-with-reordered-LSB (STE) decoding.
+- **ESC is a normal keystroke now.** `check_keys` in `main.s` was changed to forward *every* key
+  (including ESC) as `APP_TERMINAL_KEYSTROKE`; the legacy `APP_TERMINAL_START` command-line terminal is
+  gone. The RP menu handles ESC/B/arrows in `menuKeyCb` (a `term_setRawKeyCallback` hook) and consumes
+  all keys so stray typing can't reach the old line editor.
+- **The RP never resets after exit-to-desktop** — it stays resident forever (serving ROM4 via DMA,
+  polling SELECT, writing PNGs). Short SELECT = capture; long press (`SELECT_LONG_RESET`) = Booster.
+
+### In-game capture — investigated, hard limit (read before trying again)
+
+The cartridge (ROM) port has **no IRQ line and no bus-master line** — it's a passive slave. So the RP
+can never force the 68000 to run our code or read ST RAM itself; the grabber only runs when a *system
+interrupt vector we hooked* is still pointed at us **and** being serviced. Consequences:
+- Desktop, GEM apps, resolution changes, and "system-friendly" games (keep TOS's VBL) capture fine.
+- **Full-takeover games** (replace all vectors / run interrupts-masked at IPL 7 / bang hardware) cannot
+  be captured from the cartridge by *any* means — that needs downstream hardware capture (RGBtoHDMI).
+- **A multi-vector experiment (also hooking Timer C `$114`) CRASHED the ST with an address error
+  (3 bombs).** Running the multi-ms snapshot/push out of the Timer C ISR — which *is* TOS's 200 Hz
+  system-clock handler — destabilises TOS; symptom was `Screenshot BEGIN` repeating at ~200 Hz with no
+  DATA. It was reverted. **Lesson: never run long work from Timer C / the system-clock ISR.** The
+  VBL-only grabber is stable for software capture.
+
+### Build tooling changes vs the stock template
+
+- `build.sh` calls `tools/bump_version.sh` (auto-increments the patch version in `version.txt` and
+  syncs `rp/`+`target/` on every build) instead of plain `cp version.txt`. Set `SKIP_VERSION_BUMP=1`
+  to suppress for a one-off.
+- Root `Makefile` adds `make build` / `make debug` (resolve the UUID from `APP_UUID_KEY` env →
+  `uuid.txt` → a default) and `make uart` / `uart-log` / `uart-list` (auto-detect a serial device,
+  `UART_DEV=…` / `UART_BAUD=…` to override). `uuid.txt` holds this app's dev UUID.
+- `desc/app.json` is the MD/Snap descriptor (name/description/URLs point at `neilrackett.com`); the
+  release GitHub workflow is intentionally disabled (`branches: [__disabled__]`, `tags: [__disabled__]`).
+- `DPRINTF` is gated on `_DEBUG` and compiled out of release builds, so leaving diagnostic prints in is
+  free. Several are deliberately kept (`Screenshot BEGIN/written`, `SELECT -> capture request`, menu
+  trace) — handy for the next hardware iteration.
+
 ## Build
 
 Top-level build is driven by `build.sh` in the repo root:
