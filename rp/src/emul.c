@@ -106,11 +106,10 @@ static void renderMenu(void) {
   line[TERM_SCREEN_SIZE_X] = '\0';
   menuAt(0, 0, line);
 
-  menuAt(2, 0, "Your screenshots");
-
   if (shotCount == 0) {
-    menuAt(MENU_LIST_TOP_ROW + 1, 0, "You haven't taken any screenshots yet!");
+    menuAt(2, 0, "You haven't taken any screenshots yet!");
   } else {
+    menuAt(2, 0, "Your screenshots");
     int start = currentPage * MENU_PAGE_ROWS;
     for (int i = 0; i < MENU_PAGE_ROWS; i++) {
       int n = start + i;
@@ -141,7 +140,7 @@ static void renderMenu(void) {
 
   // Controls with reverse-video key caps (Atari VT52 ESC p / ESC q).
   menuAt(23, 0,
-         "\x1B" "p" "Esc" "\x1B" "q" " Exit"
+         "\x1B" "p" "Esc" "\x1B" "q" " Exit  "
          "\x1B" "p" "B" "\x1B" "q" " Booster  "
   );
 
