@@ -8,7 +8,7 @@ MD/Snap turns your SidecarTridge Multi-device into a screenshot button for your 
 
 When the app starts you'll see a list of the screenshots you've already taken. Press **ESC** to start using your ST as normal and from then on, every press of **SELECT** grabs the screen and flashes SidecarT's LED to let you know it's worked.
 
-It works in all ST resolutions (low, medium and high) and corrects the aspect ratio for you, so the saved 640×400 image looks like what you see on screen rather than squashed pixels, but can't capture overscan or apps/games that use sync-scrolling or otherwise bypass standard screen layout.
+It works in all ST resolutions (low, medium and high) and corrects the aspect ratio for you, so the saved 640×400 image looks like what you see on screen rather than squashed pixels.
 
 ## Installation
 
@@ -16,6 +16,11 @@ It works in all ST resolutions (low, medium and high) and corrects the aspect ra
 2. Copy the `.uf2` and `.json` files to the `/apps` folder of your SidecarT's microSD card.
 3. On the Booster screen, press ESC for the app list and select the MD/Snap app.
 4. To return to Booster, power on while holding SELECT or press B when the menu appears.
+
+## Known limitations
+
+- Works perfectly in GEM and simple TOS apps, but may not work in some games.
+- It doesn't work for apps that bypass standard screen layout, for example apps that use overscan or sync-scrolling.
 
 ## What's next?
 
