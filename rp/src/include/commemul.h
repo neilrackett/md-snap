@@ -23,4 +23,10 @@ typedef void (*CommEmulSampleCallback)(uint16_t sample);
 int commemul_init(void);
 void __not_in_flash_func(commemul_poll)(CommEmulSampleCallback callback);
 
+/**
+ * @brief Halt the ROM3 command ring (PIO state machine + DMA) so it stops
+ *        using the cartridge bus before another app takes over the hardware.
+ */
+void commemul_deinit(void);
+
 #endif  // COMMEMUL_H

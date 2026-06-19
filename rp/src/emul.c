@@ -57,9 +57,17 @@ static FATFS fsys;
 static bool sdReady = false;
 
 // --- screenshot list ----------------------------------------------------
-static bool endsWithPng(const char *name) {
+// Match only the files we write: "snap_*.png" (case-insensitive). The "snap_"
+// prefix also excludes macOS junk like ._AppleDouble files (start with "._")
+// and .DS_Store, which would otherwise clutter the list.
+static bool isScreenshotName(const char *name) {
   size_t l = strlen(name);
-  if (l < 4) return false;
+  if (l < 9) return false;  // "snap_" + at least "X.png"
+  if (!((name[0] == 's' || name[0] == 'S') && (name[1] == 'n' || name[1] == 'N') &&
+        (name[2] == 'a' || name[2] == 'A') && (name[3] == 'p' || name[3] == 'P') &&
+        name[4] == '_')) {
+    return false;
+  }
   const char *e = name + l - 4;
   return e[0] == '.' && (e[1] == 'P' || e[1] == 'p') &&
          (e[2] == 'N' || e[2] == 'n') && (e[3] == 'G' || e[3] == 'g');
@@ -74,7 +82,7 @@ static void scanShots(void) {
   while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != '\0' &&
          shotCount < MENU_MAX_SHOTS) {
     if (fno.fattrib & AM_DIR) continue;
-    if (!endsWithPng(fno.fname)) continue;
+    if (!isScreenshotName(fno.fname)) continue;
     strncpy(shotNames[shotCount], fno.fname, MENU_NAME_LEN - 1);
     shotNames[shotCount][MENU_NAME_LEN - 1] = '\0';
     shotCount++;
@@ -192,6 +200,17 @@ static void flashLed(void) {
 #endif
 }
 
+// Hand control back to the Booster app. The jump is in-place, so first stop the
+// cartridge-bus emulation (ROM4 read engine + ROM3 command ring): leaving their
+// PIO/DMA running would scribble over Booster as it re-initialises, corrupting
+// its screen. Does not return.
+static void gotoBooster(void) {
+  DPRINTF("Stopping bus emulation, jumping to Booster\n");
+  commemul_deinit();
+  romemul_deinit();
+  reset_jump_to_booster();
+}
+
 // Install the resident grabber on the ST, boot to the desktop, then service
 // SELECT-triggered captures forever. Never returns.
 static void exitToDesktop(void) {
@@ -239,7 +258,7 @@ static void exitToDesktop(void) {
               (int64_t)SELECT_LONG_RESET * 1000) {
         longFired = true;
         DPRINTF("SELECT long-press -> Booster\n");
-        reset_jump_to_booster();  // does not return
+        gotoBooster();  // does not return
       }
     } else if (!pressed && wasPressed) {
       if (!longFired) {
@@ -307,8 +326,15 @@ void emul_start() {
 #endif
   DPRINTF("MD/Snap: entering menu loop\n");
 
-  // Menu loop: render screenshots, navigate pages, pick an exit.
+  // Menu loop: render screenshots, navigate pages, pick an exit. SELECT is live
+  // here too, so the menu can screenshot itself (captured from the RP's own
+  // framebuffer). Seed the press state from the current level so a SELECT still
+  // held from the boot escape-hatch doesn't fire a capture the instant we enter.
   bool keepActive = true;
+  bool selPressed = select_detectPush();
+  bool selLong = false;
+  absolute_time_t selStart = get_absolute_time();
+
   while (keepActive) {
     chandler_loop();
     term_loop();
@@ -325,6 +351,31 @@ void emul_start() {
       }
     }
 
+    // SELECT: short press captures the menu itself; long press -> Booster
+    // (same gesture split as the desktop service loop).
+    bool pressed = select_detectPush();
+    if (pressed && !selPressed) {
+      selStart = get_absolute_time();
+      selLong = false;
+    } else if (pressed && selPressed) {
+      if (!selLong && absolute_time_diff_us(selStart, get_absolute_time()) >=
+                          (int64_t)SELECT_LONG_RESET * 1000) {
+        selLong = true;
+        DPRINTF("Menu SELECT long-press -> Booster\n");
+        gotoBooster();  // does not return
+      }
+    } else if (!pressed && selPressed) {
+      if (!selLong) {
+        DPRINTF("Menu SELECT -> capture menu\n");
+        if (screenshot_captureLocal()) {
+          flashLed();
+          scanShots();   // pick up the just-written file...
+          renderMenu();  // ...and show it in the list
+        }
+      }
+    }
+    selPressed = pressed;
+
     if (menuAction != MENU_NONE) {
       keepActive = false;
     }
@@ -338,7 +389,7 @@ void emul_start() {
 
   if (menuAction == MENU_BOOSTER) {
     DPRINTF("Menu -> Booster\n");
-    reset_jump_to_booster();  // does not return
+    gotoBooster();  // does not return
   }
 
   // Default / MENU_EXIT_DESKTOP: install the grabber and service captures.

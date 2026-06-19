@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "chandler.h"
+#include "constants.h"
 #include "debug.h"
 #include "ff.h"
 #include "png_writer.h"
@@ -218,10 +220,10 @@ static void find_next_index(void) {
   nextIndex = maxIdx + 1;
 }
 
-// Build "snap_NNNN_<rez>.png" (e.g. snap_0001_low.png).
-static void build_filename(char *path, size_t size) {
+// Build "snap_NNNN_<suffix>.png" (e.g. snap_0001_low.png, snap_0002_menu.png).
+static void build_filename(char *path, size_t size, const char *suffix) {
   find_next_index();
-  snprintf(path, size, "%s/snap_%04u_%s.png", destFolder, nextIndex, rez_name());
+  snprintf(path, size, "%s/snap_%04u_%s.png", destFolder, nextIndex, suffix);
 }
 
 bool screenshot_writePending(void) {
@@ -233,7 +235,7 @@ bool screenshot_writePending(void) {
   decode_palette(palette, ncolors);
 
   char path[96];
-  build_filename(path, sizeof(path));
+  build_filename(path, sizeof(path), rez_name());
 
   FIL file;
   if (f_open(&file, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
@@ -258,6 +260,56 @@ bool screenshot_writePending(void) {
     nextIndex++;
   } else {
     DPRINTF("Screenshot: write error on %s\n", path);
+  }
+  return ok;
+}
+
+bool screenshot_captureLocal(void) {
+  // The MD/Snap menu is the RP's own 320x200 mono framebuffer (what the m68k
+  // print loop copies to the ST screen), so we can grab it directly without any
+  // cartridge round-trip. It is a linear ST mono bitmap (40 bytes/row) and reads
+  // back in the correct byte order here, so no per-word swap is needed. Doubled
+  // 2x2 to 640x400. Palette matches the display (black text on white): the menu
+  // is drawn as set pixels (bit 1) = text, so index 0 = white, index 1 = black.
+  const uint8_t *fb = (const uint8_t *)((uintptr_t)&__rom_in_ram_start__ +
+                                        CHANDLER_FRAMEBUFFER_OFFSET);
+  static const uint8_t palette[2][3] = {{255, 255, 255}, {0, 0, 0}};
+
+  char path[96];
+  build_filename(path, sizeof(path), "menu");
+
+  FIL file;
+  if (f_open(&file, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+    DPRINTF("Screenshot: failed to open %s\n", path);
+    return false;
+  }
+
+  png_writer_t pw;
+  bool ok = png_writer_begin(&pw, &file, OUT_WIDTH, OUT_HEIGHT, palette, 2);
+  uint8_t row[OUT_WIDTH];
+  for (int y = 0; y < OUT_HEIGHT && ok; y++) {
+    const uint8_t *p = fb + (y / 2) * 40;  // 320x200 -> 2x vertical double
+    for (int bx = 0; bx < 40; bx++) {
+      uint8_t b = p[bx];
+      for (int bit = 7; bit >= 0; bit--) {
+        uint8_t px = (uint8_t)((b >> bit) & 1);
+        int srcx = bx * 8 + (7 - bit);  // 0..319
+        row[srcx * 2] = px;             // 2x horizontal double
+        row[srcx * 2 + 1] = px;
+      }
+    }
+    ok = png_writer_row(&pw, row, OUT_WIDTH);
+  }
+  if (ok) {
+    ok = png_writer_end(&pw);
+  }
+  f_close(&file);
+
+  if (ok) {
+    DPRINTF("Screenshot (menu) written: %s\n", path);
+    nextIndex++;
+  } else {
+    DPRINTF("Screenshot (menu): write error on %s\n", path);
   }
   return ok;
 }

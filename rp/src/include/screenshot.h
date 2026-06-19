@@ -47,4 +47,13 @@ bool screenshot_pending(void);
  */
 bool screenshot_writePending(void);
 
+/**
+ * @brief Capture the RP's own 320x200 mono framebuffer (the MD/Snap menu)
+ *        straight to a 640x400 PNG — no cartridge round-trip. Lets SELECT
+ *        screenshot the app's own screens while the menu is showing.
+ *
+ * @return true if the PNG was written successfully.
+ */
+bool screenshot_captureLocal(void);
+
 #endif  // SCREENSHOT_H

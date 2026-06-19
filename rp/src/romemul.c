@@ -11,6 +11,8 @@
 // Global variables to access them in the IRQ handlers
 static int readAddrRomDmaChannel = -1;
 static int lookupDataRomDmaChannel = -1;
+// State machine running the ROM read engine (for romemul_deinit).
+static int romSm = -1;
 
 // Default PIO to use
 static PIO defaultPio = pio0;
@@ -124,6 +126,7 @@ int init_romemul(bool copyFlashToRAM) {
     DPRINTF("Error initializing ROM emulator. Error code: %d\n", smReadROM);
     return -1;
   }
+  romSm = smReadROM;
 
   // Push to the FIFO the most significant word of the addresses used to read
   // from the emulated ROM. The PIO now consumes the 16 address lines directly,
@@ -166,4 +169,21 @@ int init_romemul(bool copyFlashToRAM) {
   }
 
   return smReadROM;
+}
+
+void romemul_deinit(void) {
+  // Halt the ROM read engine so it stops driving the cartridge bus before
+  // handing the hardware to another app (e.g. Booster). Disable the state
+  // machine first so the self-perpetuating address/lookup DMA chain loses its
+  // DREQ and stalls, then abort both channels. Leaving the app's live PIO/DMA
+  // running across an in-place jump corrupts the next app's screen.
+  if (romSm >= 0) {
+    pio_sm_set_enabled(defaultPio, romSm, false);
+  }
+  if (readAddrRomDmaChannel >= 0) {
+    dma_channel_abort(readAddrRomDmaChannel);
+  }
+  if (lookupDataRomDmaChannel >= 0) {
+    dma_channel_abort(lookupDataRomDmaChannel);
+  }
 }

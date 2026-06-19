@@ -28,4 +28,13 @@
 // Function Prototypes
 int init_romemul(bool copyFlashToRAM);
 
+/**
+ * @brief Halt the ROM emulation (PIO state machine + DMA) so it stops driving
+ *        the cartridge bus before another app takes over the hardware.
+ *
+ * Call before an in-place jump to the Booster app; leaving the live PIO/DMA
+ * running across the jump corrupts the next app.
+ */
+void romemul_deinit(void);
+
 #endif  // ROMEMUL_H

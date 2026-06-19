@@ -20,6 +20,10 @@
 
 #define RESET_WATCHDOG_TIMEOUT 20  // 20 ms
 
+// Token written to watchdog scratch[0] by reset_reboot_to_booster() and checked
+// by main() at startup to route to the Booster app after a clean chip reset.
+#define RESET_BOOSTER_MAGIC 0xB0057E40u
+
 /**
  * @brief Reset the current app and jump to the Booster app in flash
  *
@@ -60,6 +64,19 @@ static inline void reset_jump_to_booster(void) {
  * printed.
  */
 void reset_device();
+
+/**
+ * @brief Chip-reset the RP2040 and route to the Booster app on the restart.
+ *
+ * Unlike reset_jump_to_booster() (an in-place jump), this performs a full
+ * watchdog reset so the Booster starts with pristine hardware (pio0, DMA, …).
+ * An in-place jump from a running app leaves this app's live ROM-emulation
+ * PIO/DMA going, which corrupts the Booster's screen. main() detects the
+ * request via watchdog scratch[0] and jumps to the Booster early in boot.
+ *
+ * @note This function does not return.
+ */
+void reset_reboot_to_booster(void);
 
 /**
  * @brief Reset the app and reentry in the main device app in flash.

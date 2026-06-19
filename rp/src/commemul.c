@@ -97,3 +97,18 @@ void __not_in_flash_func(commemul_poll)(CommEmulSampleCallback callback) {
     commReadIdx = (commReadIdx + 1u) & COMM_RING_MASK;
   }
 }
+
+void commemul_deinit(void) {
+  // Halt the ROM3 command ring (PIO state machine + DMA) before handing the
+  // hardware to another app. Disable the SM first so the ring DMA loses its
+  // DREQ, then abort the channel.
+  if (!commInitialized) {
+    return;
+  }
+  if (commSm >= 0) {
+    pio_sm_set_enabled(commPio, commSm, false);
+  }
+  if (commDmaChannel >= 0) {
+    dma_channel_abort(commDmaChannel);
+  }
+}
