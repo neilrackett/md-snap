@@ -148,8 +148,8 @@ static void renderMenu(void) {
 
   // Controls with reverse-video key caps (Atari VT52 ESC p / ESC q).
   menuAt(23, 0,
-         "\x1B" "p" "Esc" "\x1B" "q" " Exit  "
-         "\x1B" "p" "B" "\x1B" "q" " Booster  "
+         "\x1B" "p" "Esc" "\x1B" "q" " "
+         "\x1B" "p" "B" "\x1B" "q" "ooster "
   );
 
   // Park the always-drawn block cursor in the empty bottom-right cell so it
@@ -200,12 +200,21 @@ static void flashLed(void) {
 #endif
 }
 
-// Hand control back to the Booster app. The jump is in-place, so first stop the
-// cartridge-bus emulation (ROM4 read engine + ROM3 command ring): leaving their
-// PIO/DMA running would scribble over Booster as it re-initialises, corrupting
-// its screen. Does not return.
+// Hand control back to the Booster app. Two things have to happen, in order:
+//   1. Reset the m68k. Without this the ST keeps running our terminal print
+//      loop and just draws garbage over whatever Booster paints — the screen
+//      corruption seen on a "naked" jump. CMD_RESET makes the cartridge clear
+//      memvalid and jump the reset vector, so the ST cold-boots and re-scans the
+//      cartridge (picking up Booster's ROM, since the RP is Booster by then).
+//      It must be sent while the ROM read engine is still up so the ST can read
+//      the command; then we wait for it to act.
+//   2. Stop our cartridge-bus emulation (ROM4 read engine + ROM3 ring) so
+//      Booster's re-init claims clean PIO/DMA, and jump (in-place) to Booster.
+// Does not return.
 static void gotoBooster(void) {
-  DPRINTF("Stopping bus emulation, jumping to Booster\n");
+  DPRINTF("gotoBooster: resetting ST, then jumping to Booster\n");
+  SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
+  sleep_ms(250);  // let the ST poll the sentinel and enter its reset
   commemul_deinit();
   romemul_deinit();
   reset_jump_to_booster();
