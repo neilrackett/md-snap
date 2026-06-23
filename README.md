@@ -1,5 +1,9 @@
 # MD/Snap
 
+<img width="320" height="200" alt="snap_0030_menu" src="https://github.com/user-attachments/assets/d129d29e-fb68-495d-af72-8a2bd904b6c8" /> <img width="320" height="200" alt="snap_0013_low" src="https://github.com/user-attachments/assets/a1c1d582-832f-4ced-a39c-ccfd49e5d36f" />
+
+<img width="320" height="200" alt="snap_0028_low" src="https://github.com/user-attachments/assets/2394aa5b-9665-47b2-8479-1312dd966b1e" /> <img width="320" height="200" alt="snap_0019_low" src="https://github.com/user-attachments/assets/64d82c79-e57f-497c-b4cd-5d61b4c6d363" />
+
 Microfirmware for the [SidecarTridge Multi-device](https://sidecartridge.com) by [Neil Rackett](https://x.com/neilrackett)
 
 ## Introduction
