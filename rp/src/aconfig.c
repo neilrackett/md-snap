@@ -3,7 +3,8 @@
 // We don't have any variables because this is the placeholder app
 static SettingsConfigEntry defaultEntries[] = {
     {ACONFIG_PARAM_FOLDER, SETTINGS_TYPE_STRING, "/test"},
-    {ACONFIG_PARAM_MODE, SETTINGS_TYPE_INT, "255"},  // 255: Menu mode
+    // Capture hook: 0=VBL, 1=ETV, 255=menu/default (treated as VBL).
+    {ACONFIG_PARAM_MODE, SETTINGS_TYPE_INT, "255"},
 };
 
 // Create a global context for our settings

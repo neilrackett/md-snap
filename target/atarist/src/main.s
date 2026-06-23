@@ -110,6 +110,12 @@ SHOT_SCREEN_SIZE			equ 32000
 ; stored big-endian, so the LSB is at +3 ($FA201F).
 CAPTURE_SEQ_ADDR			equ (SHARED_VARIABLES + (3 * 4) + 3)	; $FA201F
 
+; HOOK_FLAG (feat/etv experiment): the RP publishes the capture-hook choice to
+; the LSB of shared-var slot 4 before launching the grabber (0 = VBL $70,
+; 1 = etv_timer $400). The installer in userfw.s reads it. Slot 4 base = $FA2020;
+; LSB at +3 ($FA2023).
+HOOK_FLAG_ADDR				equ (SHARED_VARIABLES + (4 * 4) + 3)	; $FA2023
+
 _dskbufp                equ $4c6                            ; Address of the disk buffer pointer    
 
 

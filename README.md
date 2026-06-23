@@ -17,16 +17,22 @@ It works in all ST resolutions (low, medium and high) and corrects the aspect ra
 3. On the Booster screen, press ESC for the app list and select the MD/Snap app.
 4. To return to Booster, power on while holding SELECT or press B when the menu appears.
 
+## Capture mode
+
+You can choose between 2 screen capture modes:
+
+- VBL: Instantly capture GEM and simple TOS apps, and some games.
+- ETV: This mode is slower, typically 1-2s to save a screenshot, but works with a wider selection of apps and games (experimental).
+
 ## Known limitations
 
-- Works perfectly in GEM and TOS apps that don't replace VBL, but may not work in some games.
+- Anything that replaces VBL, ETV or Timer C will block the screen grabber, so it may not work in all games.
 - It doesn't work for apps that bypass standard screen layout, for example overscan or sync-scrolling.
 
 ## What's next?
 
 A few ideas we've had (no promises we'll do them all):
 
-- View your screenshots from the app?
 - Preview thumbnails in the menu?
 
 Think you can help? Got an idea of your own? We'd love to hear from you, so why not let me know on [X](https://x.com/neilrackett) or submit a PR.

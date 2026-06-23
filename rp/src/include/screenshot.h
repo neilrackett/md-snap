@@ -18,6 +18,8 @@
 // Command IDs (must match APP_SCREENSHOT_* in target/atarist/src/main.s).
 #define APP_SCREENSHOT_BEGIN 0x10
 #define APP_SCREENSHOT_DATA 0x11
+#define APP_SCREENSHOT_STREAM_BEGIN 0x12
+#define APP_SCREENSHOT_STREAM_DATA 0x13
 
 /**
  * @brief Initialise the screenshot receiver.

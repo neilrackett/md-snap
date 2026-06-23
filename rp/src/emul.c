@@ -12,8 +12,10 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "aconfig.h"
 #include "blink.h"
 #include "chandler.h"
 #include "commemul.h"
@@ -32,7 +34,11 @@
 #include "term.h"
 
 #define SLEEP_LOOP_MS 50
+#define DESKTOP_SERVICE_SLEEP_MS 2
 #define SCREENSHOT_FOLDER "/screenshots"
+#define HOOK_MODE_VBL 0
+#define HOOK_MODE_ETV 1
+#define HOOK_MODE_MENU 255
 
 // Box-drawing glyph in u8g2_font_amstrad_cpc_extended_8f (horizontal rule).
 #define GLYPH_H ((char)129)
@@ -40,7 +46,7 @@
 // Screenshot list state for the boot menu.
 #define MENU_MAX_SHOTS 256
 #define MENU_NAME_LEN 28  // fits "Snap_YYYYMMDD_HHMMSS.png" + NUL
-#define MENU_PAGE_ROWS 15
+#define MENU_PAGE_ROWS 16
 #define MENU_LIST_TOP_ROW 4
 
 static char shotNames[MENU_MAX_SHOTS][MENU_NAME_LEN];
@@ -52,9 +58,41 @@ static int currentPage = 0;
 typedef enum { MENU_NONE, MENU_EXIT_DESKTOP, MENU_BOOSTER } MenuAction;
 static volatile MenuAction menuAction = MENU_NONE;
 static volatile int pageDelta = 0;
+static volatile bool menuHelpVisible = false;
+static bool helpToggleTimeValid = false;
+static absolute_time_t helpLastToggle;
+
+// Capture-hook choice. The [H] key toggles it and persists the app MODE setting;
+// exit-to-desktop publishes it to the m68k grabber. false = VBL ($70, fast
+// legacy transport); true = etv_timer ($400, async stream transport).
+static volatile bool g_hookEtv = false;
+static volatile bool hookToggleReq = false;
 
 static FATFS fsys;
 static bool sdReady = false;
+
+static void loadHookMode(void) {
+  SettingsConfigEntry *entry =
+      settings_find_entry(aconfig_getContext(), ACONFIG_PARAM_MODE);
+  int mode = entry ? atoi(entry->value) : HOOK_MODE_MENU;
+  g_hookEtv = (mode == HOOK_MODE_ETV);
+  DPRINTF("MD/Snap: hook mode loaded: MODE=%d hook=%s\n", mode,
+          g_hookEtv ? "ETV" : "VBL");
+}
+
+static void saveHookMode(void) {
+  int mode = g_hookEtv ? HOOK_MODE_ETV : HOOK_MODE_VBL;
+  int err = settings_put_integer(aconfig_getContext(), ACONFIG_PARAM_MODE, mode);
+  if (err == 0) {
+    err = settings_save(aconfig_getContext(), true);
+  }
+  if (err == 0) {
+    DPRINTF("MD/Snap: hook mode saved: MODE=%d hook=%s\n", mode,
+            g_hookEtv ? "ETV" : "VBL");
+  } else {
+    DPRINTF("MD/Snap: failed to save hook mode: MODE=%d err=%d\n", mode, err);
+  }
+}
 
 // --- screenshot list ----------------------------------------------------
 // Match only the files we write: "snap_*.png" (case-insensitive). The "snap_"
@@ -103,6 +141,28 @@ static void menuAt(int row, int col, const char *s) {
   term_printString(s);
 }
 
+static const char *const menuHelpLines[] = {
+    "HELP",
+    "",
+    "Capture screenshots to your SidecarT's",
+    "SD card by pressing the SELECT button.",
+    "",
+    "",
+    "Choose between 2 screen capture modes:",
+    "",
+    "VBL  Instantly capture GEM and TOS",
+    "     apps, some games.",
+    "",
+    "ETV  Slower, but works with most apps",
+    "     and games (experimental).",
+    "",
+    "",
+    "Find out more:",
+    "",
+    "Web  github.com/neilrackett/md-snap",
+    "X    x.com/neilrackett",
+};
+
 static void renderMenu(void) {
   term_clearScreen();
 
@@ -114,7 +174,12 @@ static void renderMenu(void) {
   line[TERM_SCREEN_SIZE_X] = '\0';
   menuAt(0, 0, line);
 
-  if (shotCount == 0) {
+  if (menuHelpVisible) {
+    for (size_t i = 0; i < sizeof(menuHelpLines) / sizeof(menuHelpLines[0]);
+         i++) {
+      menuAt(2 + (int)i, 0, menuHelpLines[i]);
+    }
+  } else if (shotCount == 0) {
     menuAt(2, 0, "You haven't taken any screenshots yet!");
   } else {
     menuAt(2, 0, "Your screenshots");
@@ -146,11 +211,16 @@ static void renderMenu(void) {
   line[TERM_SCREEN_SIZE_X] = '\0';
   menuAt(22, 0, line);
 
-  // Controls with reverse-video key caps (Atari VT52 ESC p / ESC q).
-  menuAt(23, 0,
-         "\x1B" "p" "Esc" "\x1B" "q" " "
-         "\x1B" "p" "B" "\x1B" "q" "ooster "
-  );
+  // Controls with reverse-video key caps (Atari VT52 ESC p / ESC q), including
+  // the [H] hook toggle showing the current vector (feat/etv experiment).
+  char ctrl[64];
+  snprintf(ctrl, sizeof(ctrl),
+           "\x1B" "p" "Help" "\x1B" "q" " "
+           "\x1B" "p" "Esc" "\x1B" "q" " "
+           "\x1B" "p" "B" "\x1B" "q" "ooster "
+           "\x1B" "p" "H" "\x1B" "q" "ook:%s",
+           g_hookEtv ? "ETV" : "VBL");
+  menuAt(23, 0, ctrl);
 
   // Park the always-drawn block cursor in the empty bottom-right cell so it
   // doesn't sit on top of the footer text (same as md-sidepad).
@@ -160,19 +230,42 @@ static void renderMenu(void) {
 }
 
 // --- input ---------------------------------------------------------------
-// ST keyboard scan codes for the cursor keys.
+// ST keyboard scan codes for keys that do not produce useful ASCII.
+#define SCAN_HELP 0x62
 #define SCAN_LEFT 0x4B
 #define SCAN_RIGHT 0x4D
 
 static bool menuKeyCb(char ascii, uint8_t scanCode, uint8_t shift) {
   (void)shift;
   DPRINTF("MD/Snap: key ascii=%d scan=%d\n", (int)ascii, (int)scanCode);
+  if (scanCode == SCAN_HELP) {
+    absolute_time_t now = get_absolute_time();
+    if (!helpToggleTimeValid ||
+        absolute_time_diff_us(helpLastToggle, now) > 350000) {
+      helpLastToggle = now;
+      helpToggleTimeValid = true;
+      menuHelpVisible = !menuHelpVisible;
+      DPRINTF("MD/Snap: help %s\n", menuHelpVisible ? "on" : "off");
+      renderMenu();
+    }
+    return true;
+  }
+
+  if (menuHelpVisible) {
+    menuHelpVisible = false;
+    renderMenu();
+  }
+
   if (ascii == 0x1B) {  // ESC
     menuAction = MENU_EXIT_DESKTOP;
     return true;
   }
   if (ascii == 'b' || ascii == 'B') {
     menuAction = MENU_BOOSTER;
+    return true;
+  }
+  if (ascii == 'h' || ascii == 'H') {
+    hookToggleReq = true;
     return true;
   }
   if (scanCode == SCAN_LEFT) {
@@ -224,8 +317,14 @@ static void gotoBooster(void) {
 // SELECT-triggered captures forever. Never returns.
 static void exitToDesktop(void) {
   uint32_t romBase = (uint32_t)&__rom_in_ram_start__;
-  DPRINTF("MD/Snap: exitToDesktop - installing grabber and booting to GEM\n");
+  DPRINTF("MD/Snap: exitToDesktop - installing grabber (hook=%s) and booting\n",
+          g_hookEtv ? "ETV" : "VBL");
   term_setRawKeyCallback(NULL);
+
+  // Publish the capture-hook choice to shared-var slot 4 BEFORE CMD_START, so
+  // the m68k installer reads it (0 = VBL $70, 1 = etv_timer $400).
+  SET_SHARED_VAR(4, g_hookEtv ? 1 : 0, romBase, CHANDLER_SHARED_VARIABLES_OFFSET);
+  SET_SHARED_VAR(5, 0, romBase, CHANDLER_SHARED_VARIABLES_OFFSET);
 
   // Hold CMD_START so the m68k's rom_function installs the resident grabber,
   // then hold CMD_BOOT_GEM so boot_gem reliably latches and continues to GEM.
@@ -272,13 +371,14 @@ static void exitToDesktop(void) {
     } else if (!pressed && wasPressed) {
       if (!longFired) {
         captureSeq++;
+        SET_SHARED_VAR(5, 0, romBase, CHANDLER_SHARED_VARIABLES_OFFSET);
         SET_SHARED_VAR(3, captureSeq, romBase, CHANDLER_SHARED_VARIABLES_OFFSET);
         DPRINTF("SELECT -> capture request %u\n", captureSeq);
       }
     }
     wasPressed = pressed;
 
-    sleep_ms(20);
+    sleep_ms(DESKTOP_SERVICE_SLEEP_MS);
   }
 }
 
@@ -318,6 +418,7 @@ void emul_start() {
 
   display_setupU8g2();  // re-init after SD touched the display path
   screenshot_init(SCREENSHOT_FOLDER);
+  loadHookMode();
 
   // SELECT button (also used for the boot escape hatch in main.c).
   select_configure();
@@ -326,6 +427,8 @@ void emul_start() {
   term_init();
   scanShots();
   currentPage = 0;
+  menuHelpVisible = false;
+  helpToggleTimeValid = false;
   renderMenu();
   term_setRawKeyCallback(menuKeyCb);
   DPRINTF("MD/Snap: menu rendered (%d screenshots)\n", shotCount);
@@ -358,6 +461,13 @@ void emul_start() {
         currentPage = p;
         renderMenu();
       }
+    }
+
+    if (hookToggleReq) {
+      hookToggleReq = false;
+      g_hookEtv = !g_hookEtv;
+      saveHookMode();
+      renderMenu();  // repaint the footer with the new Hook:VBL/ETV
     }
 
     // SELECT: short press captures the menu itself; long press -> Booster

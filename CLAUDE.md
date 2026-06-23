@@ -61,11 +61,18 @@ interrupt vector we hooked* is still pointed at us **and** being serviced. Conse
 - Desktop, GEM apps, resolution changes, and "system-friendly" games (keep TOS's VBL) capture fine.
 - **Full-takeover games** (replace all vectors / run interrupts-masked at IPL 7 / bang hardware) cannot
   be captured from the cartridge by *any* means — that needs downstream hardware capture (RGBtoHDMI).
-- **A multi-vector experiment (also hooking Timer C `$114`) CRASHED the ST with an address error
-  (3 bombs).** Running the multi-ms snapshot/push out of the Timer C ISR — which *is* TOS's 200 Hz
-  system-clock handler — destabilises TOS; symptom was `Screenshot BEGIN` repeating at ~200 Hz with no
-  DATA. It was reverted. **Lesson: never run long work from Timer C / the system-clock ISR.** The
-  VBL-only grabber is stable for software capture.
+- **Two timer-C-driven hooks were tried to reach VBL-replacing programs; BOTH froze the ST.** (1) the
+  raw MFP Timer C autovector `$114`, and (2) the *supported* `etv_timer` vector `$400` (selectable via
+  an `[H]` VBL/ETV menu toggle, rate-limited to ~50 Hz). Same symptom each time: `Screenshot BEGIN`
+  repeating forever with no DATA + a frozen foreground — the capture's blocking multi-chunk handshake
+  transport wedges inside the 200 Hz timer-C ISR before the state machine can advance, and the timer
+  keeps re-firing the handler. **Lesson: never run the heavy/blocking capture from Timer C / the
+  system-clock ISR — VBL (`$70`) is the ceiling for this capture design.** (md-devops hooks
+  `etv_timer` fine only because its handler is *lightweight* — poll a sentinel, dispatch tiny bounded
+  commands — never a blocking transport. See `md-devops/.../runner.s`.) Programs that replace the VBL
+  therefore can't be captured; that's RGBtoHDMI territory. The `[H]` VBL/ETV toggle (`HOOK_FLAG_ADDR`
+  slot 4 + the etv_timer install path) is **preserved on the `feat/etv` branch as an experiment** and
+  must NOT be merged to the stable line — VBL-only is what ships.
 
 ### Build tooling changes vs the stock template
 
@@ -80,6 +87,13 @@ interrupt vector we hooked* is still pointed at us **and** being serviced. Conse
 - `DPRINTF` is gated on `_DEBUG` and compiled out of release builds, so leaving diagnostic prints in is
   free. Several are deliberately kept (`Screenshot BEGIN/written`, `SELECT -> capture request`, menu
   trace) — handy for the next hardware iteration.
+- **`firmware.py` requires the zero-trimmed image to be an EVEN number of bytes, and `build.sh` does
+  NOT abort if it fails.** Because it zero-trims, the *last non-zero byte* in the cartridge image must
+  sit at an odd offset (→ even length). A stray non-zero data byte near the end at an even offset (e.g.
+  giving a resident state field a non-zero default) makes the trim odd-length → `firmware.py` raises
+  `ValueError` → `target_firmware.h` is **silently left stale** and the RP build ships the *previous*
+  cartridge. Watch for `target_firmware.h generated successfully!` in the build log; keep trailing
+  resident-block data zero (let the installer set it at runtime).
 
 ## Build
 

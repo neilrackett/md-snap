@@ -23,6 +23,12 @@
 #define SHOT_NUM_CHUNKS 16
 #define SHOT_SCREEN_SIZE 32000
 
+// ETV mode uses smaller async stream frames so the timer hook never waits for
+// RP acknowledgement inside the ISR.
+#define SHOT_STREAM_FRAME_SIZE 500
+#define SHOT_STREAM_FRAME_COUNT 64
+#define SHOT_STREAM_ACK_SLOT 5
+
 #define OUT_WIDTH 640
 #define OUT_HEIGHT 400
 
@@ -31,6 +37,7 @@
 // therefore start at fixed word offsets.
 #define PW_D3 2   // first param word (low half)
 #define PW_D4 4    // second param word
+#define PW_D5 6    // third param word
 #define PW_BUF 8   // buffer data begins here
 
 // Received state.
@@ -39,6 +46,8 @@ static uint16_t paletteRaw[16];
 static uint32_t shotRez;          // 0 = low, 1 = med, 2 = high
 static uint32_t shotMch;          // _MCH cookie value (high word = machine)
 static uint16_t chunksMask;       // bit i set once chunk i has arrived
+static uint64_t streamFrameMask;  // bit i set once async stream frame i arrived
+static uint16_t streamSeq;
 static bool beginReceived;
 static volatile bool readyFlag;
 
@@ -46,14 +55,31 @@ static char destFolder[64] = "/screenshots";
 static bool nextIndexValid;
 static unsigned nextIndex = 1;
 
+static inline uint32_t payload32(const uint16_t *p, int wordOffset) {
+  return ((uint32_t)p[wordOffset + 1] << 16) | p[wordOffset];
+}
+
+static void write_stream_ack(uint16_t seq, uint16_t nextFrame) {
+  uint32_t value = ((uint32_t)seq << 16) | nextFrame;
+  uintptr_t slot = (uintptr_t)&__rom_in_ram_start__ +
+                   CHANDLER_SHARED_VARIABLES_OFFSET +
+                   (SHOT_STREAM_ACK_SLOT * 4);
+  *((volatile uint16_t *)(slot + 2)) = (uint16_t)(value & 0xFFFF);
+  *((volatile uint16_t *)slot) = (uint16_t)(value >> 16);
+  DPRINTF("Screenshot STREAM ACK: seq=%u next=%u\n", seq, nextFrame);
+}
+
 void screenshot_init(const char *folder) {
   if (folder && folder[0]) {
     strncpy(destFolder, folder, sizeof(destFolder) - 1);
     destFolder[sizeof(destFolder) - 1] = '\0';
   }
   chunksMask = 0;
+  streamFrameMask = 0;
+  streamSeq = 0;
   beginReceived = false;
   readyFlag = false;
+  write_stream_ack(0, 0);
 }
 
 void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
@@ -64,11 +90,12 @@ void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
   switch (protocol->command_id) {
     case APP_SCREENSHOT_BEGIN: {
       shotRez = p[PW_D3];
-      shotMch = ((uint32_t)p[PW_D4 + 1] << 16) | p[PW_D4];
+      shotMch = payload32(p, PW_D4);
       for (int i = 0; i < 16; i++) {
         paletteRaw[i] = p[PW_BUF + i];
       }
       chunksMask = 0;
+      streamFrameMask = 0;
       beginReceived = true;
       readyFlag = false;
       DPRINTF("Screenshot BEGIN: rez=%lu mch=0x%08lX\n",
@@ -93,6 +120,44 @@ void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
       chunksMask |= (uint16_t)(1u << idx);
       if (chunksMask == 0xFFFF) {
         readyFlag = true;  // all 16 chunks in
+      }
+      break;
+    }
+    case APP_SCREENSHOT_STREAM_BEGIN: {
+      streamSeq = (uint16_t)p[PW_D3];
+      shotRez = p[PW_D4];
+      shotMch = payload32(p, PW_D5);
+      for (int i = 0; i < 16; i++) {
+        paletteRaw[i] = p[PW_BUF + i];
+      }
+      chunksMask = 0;
+      streamFrameMask = 0;
+      beginReceived = true;
+      readyFlag = false;
+      write_stream_ack(streamSeq, 0);
+      DPRINTF("Screenshot STREAM BEGIN: seq=%u rez=%lu mch=0x%08lX\n",
+              streamSeq, (unsigned long)shotRez, (unsigned long)shotMch);
+      break;
+    }
+    case APP_SCREENSHOT_STREAM_DATA: {
+      if (!beginReceived) {
+        break;
+      }
+      uint16_t seq = (uint16_t)p[PW_D3];
+      uint32_t idx = p[PW_D4];
+      if (seq != streamSeq || idx >= SHOT_STREAM_FRAME_COUNT) {
+        break;
+      }
+      uint8_t *dst = source + idx * SHOT_STREAM_FRAME_SIZE;
+      const uint16_t *w = p + PW_BUF;
+      for (int i = 0; i < SHOT_STREAM_FRAME_SIZE / 2; i++) {
+        dst[i * 2] = (uint8_t)(w[i] >> 8);
+        dst[i * 2 + 1] = (uint8_t)(w[i] & 0xFF);
+      }
+      streamFrameMask |= (uint64_t)1 << idx;
+      write_stream_ack(seq, (uint16_t)(idx + 1));
+      if (streamFrameMask == UINT64_MAX) {
+        readyFlag = true;
       }
       break;
     }
