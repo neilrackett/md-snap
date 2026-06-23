@@ -48,10 +48,18 @@
 #define MENU_NAME_LEN 28  // fits "Snap_YYYYMMDD_HHMMSS.png" + NUL
 #define MENU_PAGE_ROWS 16
 #define MENU_LIST_TOP_ROW 4
+#define SNAP_AUTOEXIT_ARM_DELAY_MS 6000
+#define SNAP_AUTOEXIT_SECONDS 10
 
 static char shotNames[MENU_MAX_SHOTS][MENU_NAME_LEN];
 static int shotCount = 0;
 static int currentPage = 0;
+static bool autoExitActive = false;
+static bool autoExitStarted = false;
+static bool autoExitCancelled = false;
+static absolute_time_t autoExitArmDeadline;
+static absolute_time_t autoExitDeadline;
+static int autoExitRenderedSeconds = -1;
 
 // Menu navigation requests, set from the keystroke callback (term_loop ctx),
 // acted on in the main loop.
@@ -134,6 +142,29 @@ static int totalPages(void) {
 }
 
 // --- menu rendering ------------------------------------------------------
+static int autoExitSecondsRemaining(void) {
+  int64_t remUs = absolute_time_diff_us(get_absolute_time(), autoExitDeadline);
+  int secs = (int)((remUs + 999999) / 1000000);  // ceil to whole seconds
+  return (secs < 1) ? 1 : secs;
+}
+
+static void startAutoExitCountdown(void) {
+  if (autoExitStarted || autoExitCancelled) return;
+  autoExitStarted = true;
+  autoExitActive = true;
+  autoExitRenderedSeconds = -1;
+  autoExitDeadline = make_timeout_time_ms(SNAP_AUTOEXIT_SECONDS * 1000);
+}
+
+static bool cancelAutoExitCountdown(void) {
+  autoExitCancelled = true;
+  if (!autoExitActive) return false;
+  autoExitActive = false;
+  autoExitRenderedSeconds = -1;
+  DPRINTF("Auto-exit countdown cancelled\n");
+  return true;
+}
+
 static void menuAt(int row, int col, const char *s) {
   char seq[5] = {0x1B, 'Y', (char)(TERM_POS_Y + row), (char)(TERM_POS_X + col),
                  0};
@@ -179,17 +210,29 @@ static void renderMenu(void) {
          i++) {
       menuAt(2 + (int)i, 0, menuHelpLines[i]);
     }
-  } else if (shotCount == 0) {
-    menuAt(2, 0, "You haven't taken any screenshots yet!");
   } else {
-    menuAt(2, 0, "Your screenshots");
-    int start = currentPage * MENU_PAGE_ROWS;
-    for (int i = 0; i < MENU_PAGE_ROWS; i++) {
-      int n = start + i;
-      if (n >= shotCount) break;
-      char row[TERM_SCREEN_SIZE_X + 1];
-      snprintf(row, sizeof(row), " %s", shotNames[n]);
-      menuAt(MENU_LIST_TOP_ROW + i, 0, row);
+    if (autoExitActive) {
+      int secs = autoExitSecondsRemaining();
+      autoExitRenderedSeconds = secs;
+      char countdown[TERM_SCREEN_SIZE_X + 1];
+      snprintf(countdown, sizeof(countdown), "Exit in %ds (any key to cancel)",
+               secs);
+      menuAt(2, 0, countdown);
+    } else if (shotCount == 0) {
+      menuAt(2, 0, "You haven't taken any screenshots yet!");
+    } else {
+      menuAt(2, 0, "Your screenshots");
+    }
+
+    if (shotCount > 0) {
+      int start = currentPage * MENU_PAGE_ROWS;
+      for (int i = 0; i < MENU_PAGE_ROWS; i++) {
+        int n = start + i;
+        if (n >= shotCount) break;
+        char row[TERM_SCREEN_SIZE_X + 1];
+        snprintf(row, sizeof(row), " %s", shotNames[n]);
+        menuAt(MENU_LIST_TOP_ROW + i, 0, row);
+      }
     }
   }
 
@@ -238,6 +281,10 @@ static void renderMenu(void) {
 static bool menuKeyCb(char ascii, uint8_t scanCode, uint8_t shift) {
   (void)shift;
   DPRINTF("MD/Snap: key ascii=%d scan=%d\n", (int)ascii, (int)scanCode);
+  if (cancelAutoExitCountdown()) {
+    renderMenu();
+  }
+
   if (scanCode == SCAN_HELP) {
     absolute_time_t now = get_absolute_time();
     if (!helpToggleTimeValid ||
@@ -429,7 +476,12 @@ void emul_start() {
   currentPage = 0;
   menuHelpVisible = false;
   helpToggleTimeValid = false;
+  autoExitActive = false;
+  autoExitStarted = false;
+  autoExitCancelled = false;
+  autoExitRenderedSeconds = -1;
   renderMenu();
+  autoExitArmDeadline = make_timeout_time_ms(SNAP_AUTOEXIT_ARM_DELAY_MS);
   term_setRawKeyCallback(menuKeyCb);
   DPRINTF("MD/Snap: menu rendered (%d screenshots)\n", shotCount);
 
@@ -450,6 +502,25 @@ void emul_start() {
   while (keepActive) {
     chandler_loop();
     term_loop();
+
+    if (!autoExitStarted && !autoExitCancelled &&
+        absolute_time_diff_us(get_absolute_time(), autoExitArmDeadline) <= 0) {
+      startAutoExitCountdown();
+      renderMenu();
+    }
+
+    if (autoExitActive) {
+      if (absolute_time_diff_us(get_absolute_time(), autoExitDeadline) <= 0) {
+        DPRINTF("Auto-exit countdown elapsed; exiting to desktop\n");
+        autoExitActive = false;
+        menuAction = MENU_EXIT_DESKTOP;
+      } else {
+        int secs = autoExitSecondsRemaining();
+        if (secs != autoExitRenderedSeconds) {
+          renderMenu();
+        }
+      }
+    }
 
     if (pageDelta != 0) {
       int p = currentPage + pageDelta;
@@ -474,6 +545,9 @@ void emul_start() {
     // (same gesture split as the desktop service loop).
     bool pressed = select_detectPush();
     if (pressed && !selPressed) {
+      if (cancelAutoExitCountdown()) {
+        renderMenu();
+      }
       selStart = get_absolute_time();
       selLong = false;
     } else if (pressed && selPressed) {
