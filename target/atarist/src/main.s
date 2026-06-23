@@ -45,6 +45,15 @@ FRAMEBUFFER_SIZE	equ 8000	; 8000 bytes of a 320x200 monochrome screen
 FRAMEBUFFER_ADDR	equ (ROM4_ADDR + $10000 - FRAMEBUFFER_SIZE)	; $FAE040
 APP_BUFFERS_ADDR	equ (SHARED_BLOCK_ADDR + $100)			; $FA2100
 TRANSTABLE		equ APP_BUFFERS_ADDR				; high-res translation table
+PREVIEW_OVERLAY_ADDR	equ (APP_BUFFERS_ADDR + $200)			; low-res colour preview block
+PREVIEW_FLAG		equ PREVIEW_OVERLAY_ADDR
+PREVIEW_PALETTE		equ (PREVIEW_OVERLAY_ADDR + 2)
+PREVIEW_DATA		equ (PREVIEW_OVERLAY_ADDR + 34)
+PREVIEW_SCREEN_OFFSET	equ $1458	; y=32, x=176: 32*160 + 11*8
+PREVIEW_ROWS		equ 90
+PREVIEW_ROW_WORDS	equ 36		; 144 px = 9 low-res groups * 4 planes
+PREVIEW_ROW_SKIP	equ 88		; 160-byte screen row - 72-byte preview row
+PALETTE_ADDR		equ $FFFF8240
 
 ; User firmware entry point. The cartridge image places userfw.s at
 ; offset $0800 of BOOT.BIN via target/atarist/src/userfw.ld; main.s
@@ -109,6 +118,11 @@ SHOT_SCREEN_SIZE			equ 32000
 ; it changes. Slot 3 base = SHARED_VARIABLES + 3*4 = $FA201C; the value is
 ; stored big-endian, so the LSB is at +3 ($FA201F).
 CAPTURE_SEQ_ADDR			equ (SHARED_VARIABLES + (3 * 4) + 3)	; $FA201F
+
+; MENU_FRAME_SEQ: the RP bumps shared-var slot 7 after it has finished writing
+; the terminal framebuffer and optional preview block. The cartridge menu loop
+; only redraws the ST screen when this byte changes, then keeps polling input.
+MENU_FRAME_SEQ_ADDR		equ (SHARED_VARIABLES + (7 * 4) + 3)	; $FA202F
 
 ; HOOK_FLAG (feat/etv experiment): the RP publishes the capture-hook choice to
 ; the LSB of shared-var slot 4 before launching the grabber (0 = VBL $70,
@@ -259,11 +273,21 @@ start_rom_code:
 
 ; Get the resolution of the screen
 	get_rez
-	cmp.w #2, d0				; Check if the resolution is 640x400 (high resolution)
+	move.w d0, d5
+	moveq #6, d3				; shared-var slot 6 = menu resolution
+	moveq #0, d4
+	move.w d5, d4
+	send_sync CMD_SET_SHARED_VAR, 8
+	cmp.w #2, d5				; Check if the resolution is 640x400 (high resolution)
 	beq .print_loop_high		; If it is, print the message in high resolution
 
 .print_loop_low:
 	vsync_wait
+	move.b MENU_FRAME_SEQ_ADDR, d0
+	lea menu_draw_seq(pc), a5
+	cmp.b (a5), d0
+	beq .poll_low
+	move.b d0, (a5)
 
 ; We must move from the cartridge ROM to the screen memory to display the messages
 	move.l a6, a0				; Set the screen memory address in a0
@@ -281,13 +305,22 @@ start_rom_code:
 	move.l d2, (a0)+			; Copy the word to the screen memory
 	dbf d0, .copy_screen_low    ; Loop until all the message is copied
 
+	bsr preview_blit_low
+	bsr preview_palette_low
+
 ; Check the different commands and the keyboard
+.poll_low:
 	check_commands
 
 	bra .print_loop_low		; Continue printing the message
 
 .print_loop_high:
 	vsync_wait
+	move.b MENU_FRAME_SEQ_ADDR, d0
+	lea menu_draw_seq(pc), a5
+	cmp.b (a5), d0
+	beq .poll_high
+	move.b d0, (a5)
 
 ; We must move from the cartridge ROM to the screen memory to display the messages
 	move.l a6, a1				; Set the screen memory address in a1
@@ -326,6 +359,7 @@ start_rom_code:
 	dbf d0, .copy_screen_row_high   ; Loop until all the message is copied
 
 ; Check the different commands and the keyboard
+.poll_high:
 	check_commands
 
 	bra .print_loop_high		; Continue printing the message
@@ -342,6 +376,49 @@ start_rom_code:
 	move.l $4.w, a0			; Now we can safely jump to the reset vector
 	jmp (a0)
 	nop
+
+preview_palette_low:
+	move.w PREVIEW_FLAG, d0
+	beq.s .preview_default_palette
+
+	movea.l #PREVIEW_PALETTE, a0
+	movea.l #PALETTE_ADDR, a1
+	moveq #15, d0
+.preview_palette_loop:
+	move.w (a0)+, (a1)+
+	dbf d0, .preview_palette_loop
+	rts
+
+.preview_default_palette:
+	lea preview_default_palette(pc), a0
+	movea.l #PALETTE_ADDR, a1
+	moveq #15, d0
+.preview_default_loop:
+	move.w (a0)+, (a1)+
+	dbf d0, .preview_default_loop
+	rts
+
+preview_blit_low:
+	move.w PREVIEW_FLAG, d0
+	beq.s .preview_blit_done
+
+	movea.l #PREVIEW_DATA, a0
+	movea.l a6, a1
+	lea PREVIEW_SCREEN_OFFSET(a1), a1
+	move.w #(PREVIEW_ROWS - 1), d0
+.preview_row_loop:
+	move.w #(PREVIEW_ROW_WORDS - 1), d1
+.preview_word_loop:
+	move.w (a0)+, (a1)+
+	dbf d1, .preview_word_loop
+	lea PREVIEW_ROW_SKIP(a1), a1
+	dbf d0, .preview_row_loop
+.preview_blit_done:
+	rts
+
+preview_default_palette:
+	dc.w $0777,$0000,$0000,$0000,$0000,$0000,$0000,$0000
+	dc.w $0000,$0000,$0000,$0000,$0000,$0000,$0000,$0000
 
 GEMDOS_Cconws		equ 9	; trap #1 -> print null-terminated string
 
@@ -390,6 +467,9 @@ rom_function:
 
 userfw_installed:
     dc.l    0
+menu_draw_seq:
+	dc.b    $ff
+	even
 
 ; Shared functions included at the end of the file
 ; Don't forget to include the macros for the shared functions at the top of file

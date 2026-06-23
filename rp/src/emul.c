@@ -25,6 +25,7 @@
 #include "ff.h"
 #include "memfunc.h"
 #include "pico/stdlib.h"
+#include "preview_overlay.h"
 #include "reset.h"
 #include "romemul.h"
 #include "screenshot.h"
@@ -39,6 +40,9 @@
 #define HOOK_MODE_VBL 0
 #define HOOK_MODE_ETV 1
 #define HOOK_MODE_MENU 255
+#define SHARED_VAR_MENU_REZ 6
+#define SHARED_VAR_MENU_FRAME 7
+#define ST_REZ_HIGH 2
 
 // Box-drawing glyph in u8g2_font_amstrad_cpc_extended_8f (horizontal rule).
 #define GLYPH_H ((char)129)
@@ -48,12 +52,15 @@
 #define MENU_NAME_LEN 28  // fits "Snap_YYYYMMDD_HHMMSS.png" + NUL
 #define MENU_PAGE_ROWS 16
 #define MENU_LIST_TOP_ROW 4
+#define MENU_NAME_FIELD_WIDTH 20
+#define MENU_HIGHLIGHT_WIDTH (MENU_NAME_FIELD_WIDTH + 2)
 #define SNAP_AUTOEXIT_ARM_DELAY_MS 6000
 #define SNAP_AUTOEXIT_SECONDS 10
 
 static char shotNames[MENU_MAX_SHOTS][MENU_NAME_LEN];
 static int shotCount = 0;
 static int currentPage = 0;
+static int selectedIndex = 0;
 static bool autoExitActive = false;
 static bool autoExitStarted = false;
 static bool autoExitCancelled = false;
@@ -66,6 +73,7 @@ static int autoExitRenderedSeconds = -1;
 typedef enum { MENU_NONE, MENU_EXIT_DESKTOP, MENU_BOOSTER } MenuAction;
 static volatile MenuAction menuAction = MENU_NONE;
 static volatile int pageDelta = 0;
+static volatile int selectionDelta = 0;
 static volatile bool menuHelpVisible = false;
 static bool helpToggleTimeValid = false;
 static absolute_time_t helpLastToggle;
@@ -75,9 +83,39 @@ static absolute_time_t helpLastToggle;
 // legacy transport); true = etv_timer ($400, async stream transport).
 static volatile bool g_hookEtv = false;
 static volatile bool hookToggleReq = false;
+static volatile bool previewToggleReq = false;
+static bool previewVisible = false;
+static bool previewAvailable = true;
+static bool previewOverlayActive = false;
+static int previewOverlayIndex = -1;
+static uint8_t menuFrameSeq = 0;
 
 static FATFS fsys;
 static bool sdReady = false;
+
+static uint32_t readSharedVar(uint8_t index) {
+  uint32_t base = (uint32_t)&__rom_in_ram_start__;
+  uint16_t high =
+      *((volatile uint16_t *)(base + CHANDLER_SHARED_VARIABLES_OFFSET +
+                              (index * 4)));
+  uint16_t low =
+      *((volatile uint16_t *)(base + CHANDLER_SHARED_VARIABLES_OFFSET +
+                              (index * 4) + 2));
+  return ((uint32_t)high << 16) | low;
+}
+
+static void writeSharedVar(uint8_t index, uint32_t value) {
+  uint32_t base = (uint32_t)&__rom_in_ram_start__;
+  *((volatile uint16_t *)(base + CHANDLER_SHARED_VARIABLES_OFFSET +
+                          (index * 4) + 2)) = value & 0xFFFF;
+  *((volatile uint16_t *)(base + CHANDLER_SHARED_VARIABLES_OFFSET +
+                          (index * 4))) = value >> 16;
+}
+
+static void publishMenuFrame(void) {
+  menuFrameSeq++;
+  writeSharedVar(SHARED_VAR_MENU_FRAME, menuFrameSeq);
+}
 
 static void loadHookMode(void) {
   SettingsConfigEntry *entry =
@@ -141,6 +179,38 @@ static int totalPages(void) {
   return (p < 1) ? 1 : p;
 }
 
+static void clampSelection(void) {
+  if (shotCount <= 0) {
+    selectedIndex = 0;
+    currentPage = 0;
+    return;
+  }
+  if (selectedIndex < 0) {
+    selectedIndex = 0;
+  } else if (selectedIndex >= shotCount) {
+    selectedIndex = shotCount - 1;
+  }
+  int pages = totalPages();
+  if (currentPage < 0) {
+    currentPage = 0;
+  } else if (currentPage >= pages) {
+    currentPage = pages - 1;
+  }
+}
+
+static bool updatePreviewAvailability(void) {
+  bool wasAvailable = previewAvailable;
+  uint32_t rez = readSharedVar(SHARED_VAR_MENU_REZ);
+  previewAvailable = (rez != ST_REZ_HIGH);
+  if (!previewAvailable) {
+    previewVisible = false;
+    preview_overlay_disable();
+    previewOverlayActive = false;
+    previewOverlayIndex = -1;
+  }
+  return previewAvailable != wasAvailable;
+}
+
 // --- menu rendering ------------------------------------------------------
 static int autoExitSecondsRemaining(void) {
   int64_t remUs = absolute_time_diff_us(get_absolute_time(), autoExitDeadline);
@@ -172,6 +242,30 @@ static void menuAt(int row, int col, const char *s) {
   term_printString(s);
 }
 
+static void syncPreviewOverlay(void) {
+  bool active = previewVisible && previewAvailable && !menuHelpVisible &&
+                shotCount > 0 && selectedIndex >= 0 &&
+                selectedIndex < shotCount;
+  if (!active) {
+    if (previewOverlayActive) {
+      preview_overlay_disable();
+      previewOverlayActive = false;
+      previewOverlayIndex = -1;
+    } else {
+      preview_overlay_disable();
+    }
+    return;
+  }
+
+  if (previewOverlayActive && previewOverlayIndex == selectedIndex) {
+    return;
+  }
+
+  previewOverlayActive =
+      preview_overlay_show(SCREENSHOT_FOLDER, shotNames[selectedIndex]);
+  previewOverlayIndex = selectedIndex;
+}
+
 static const char *const menuHelpLines[] = {
     "HELP",
     "",
@@ -195,6 +289,7 @@ static const char *const menuHelpLines[] = {
 };
 
 static void renderMenu(void) {
+  clampSelection();
   term_clearScreen();
 
   // Header: rule with the title inset at column 2 (md-sidepad style, no spaces).
@@ -230,7 +325,12 @@ static void renderMenu(void) {
         int n = start + i;
         if (n >= shotCount) break;
         char row[TERM_SCREEN_SIZE_X + 1];
-        snprintf(row, sizeof(row), " %s", shotNames[n]);
+        if (n == selectedIndex) {
+          snprintf(row, sizeof(row), "\x1B" "p" " %-20.20s " "\x1B" "q",
+                   shotNames[n]);
+        } else {
+          snprintf(row, sizeof(row), " %-20.20s ", shotNames[n]);
+        }
         menuAt(MENU_LIST_TOP_ROW + i, 0, row);
       }
     }
@@ -258,11 +358,14 @@ static void renderMenu(void) {
   // the [H] hook toggle showing the current vector (feat/etv experiment).
   char ctrl[64];
   snprintf(ctrl, sizeof(ctrl),
-           "\x1B" "p" "Help" "\x1B" "q" " "
-           "\x1B" "p" "Esc" "\x1B" "q" " "
-           "\x1B" "p" "B" "\x1B" "q" "ooster "
-           "\x1B" "p" "H" "\x1B" "q" "ook:%s",
-           g_hookEtv ? "ETV" : "VBL");
+    "\x1B" "p" "Help" "\x1B" "q" " "
+    "\x1B" "p" "Esc" "\x1B" "q" " "
+    "\x1B" "p" "B" "\x1B" "q" "ooster "
+    "\x1B" "p" "H" "\x1B" "q" "ook:%s "
+    "%s",
+    g_hookEtv ? "ETV" : "VBL",
+    previewAvailable ? "\x1B" "p" "P" "\x1B" "q" "review " : ""
+  );
   menuAt(23, 0, ctrl);
 
   // Park the always-drawn block cursor in the empty bottom-right cell so it
@@ -270,6 +373,8 @@ static void renderMenu(void) {
   menuAt(TERM_SCREEN_SIZE_Y - 1, TERM_SCREEN_SIZE_X - 1, "");
 
   display_refresh();
+  syncPreviewOverlay();
+  publishMenuFrame();
 }
 
 // --- input ---------------------------------------------------------------
@@ -277,6 +382,8 @@ static void renderMenu(void) {
 #define SCAN_HELP 0x62
 #define SCAN_LEFT 0x4B
 #define SCAN_RIGHT 0x4D
+#define SCAN_UP 0x48
+#define SCAN_DOWN 0x50
 
 static bool menuKeyCb(char ascii, uint8_t scanCode, uint8_t shift) {
   (void)shift;
@@ -313,6 +420,20 @@ static bool menuKeyCb(char ascii, uint8_t scanCode, uint8_t shift) {
   }
   if (ascii == 'h' || ascii == 'H') {
     hookToggleReq = true;
+    return true;
+  }
+  if (ascii == 'p' || ascii == 'P') {
+    if (previewAvailable) {
+      previewToggleReq = true;
+    }
+    return true;
+  }
+  if (scanCode == SCAN_UP) {
+    selectionDelta = -1;
+    return true;
+  }
+  if (scanCode == SCAN_DOWN) {
+    selectionDelta = +1;
     return true;
   }
   if (scanCode == SCAN_LEFT) {
@@ -440,6 +561,9 @@ void emul_start() {
   // could read as a spurious RESET/BOOT_GEM/START before the first display NOP.
   *((volatile uint32_t *)((uintptr_t)&__rom_in_ram_start__ +
                           CHANDLER_CMD_SENTINEL_OFFSET)) = 0;
+  SET_SHARED_VAR(SHARED_VAR_MENU_REZ, 0, (uint32_t)&__rom_in_ram_start__,
+                 CHANDLER_SHARED_VARIABLES_OFFSET);
+  writeSharedVar(SHARED_VAR_MENU_FRAME, 0);
 
   if (init_romemul(false) < 0) {
     panic("init_romemul failed: PIO/DMA claim or program load returned <0");
@@ -464,6 +588,7 @@ void emul_start() {
   }
 
   display_setupU8g2();  // re-init after SD touched the display path
+  preview_overlay_init();
   screenshot_init(SCREENSHOT_FOLDER);
   loadHookMode();
 
@@ -474,6 +599,11 @@ void emul_start() {
   term_init();
   scanShots();
   currentPage = 0;
+  selectedIndex = 0;
+  previewVisible = false;
+  previewAvailable = true;
+  previewOverlayActive = false;
+  previewOverlayIndex = -1;
   menuHelpVisible = false;
   helpToggleTimeValid = false;
   autoExitActive = false;
@@ -503,6 +633,10 @@ void emul_start() {
     chandler_loop();
     term_loop();
 
+    if (updatePreviewAvailability()) {
+      renderMenu();
+    }
+
     if (!autoExitStarted && !autoExitCancelled &&
         absolute_time_diff_us(get_absolute_time(), autoExitArmDeadline) <= 0) {
       startAutoExitCountdown();
@@ -530,7 +664,25 @@ void emul_start() {
       if (p >= pages) p = pages - 1;
       if (p != currentPage) {
         currentPage = p;
+        selectedIndex = currentPage * MENU_PAGE_ROWS;
+        clampSelection();
+        previewOverlayActive = false;
         renderMenu();
+      }
+    }
+
+    if (selectionDelta != 0) {
+      int delta = selectionDelta;
+      selectionDelta = 0;
+      if (shotCount > 0) {
+        int oldSelected = selectedIndex;
+        selectedIndex += delta;
+        clampSelection();
+        currentPage = selectedIndex / MENU_PAGE_ROWS;
+        if (selectedIndex != oldSelected) {
+          previewOverlayActive = false;
+          renderMenu();
+        }
       }
     }
 
@@ -539,6 +691,15 @@ void emul_start() {
       g_hookEtv = !g_hookEtv;
       saveHookMode();
       renderMenu();  // repaint the footer with the new Hook:VBL/ETV
+    }
+
+    if (previewToggleReq) {
+      previewToggleReq = false;
+      if (previewAvailable) {
+        previewVisible = !previewVisible;
+        previewOverlayActive = false;
+        renderMenu();
+      }
     }
 
     // SELECT: short press captures the menu itself; long press -> Booster
@@ -563,6 +724,8 @@ void emul_start() {
         if (screenshot_captureLocal()) {
           flashLed();
           scanShots();   // pick up the just-written file...
+          clampSelection();
+          previewOverlayActive = false;
           renderMenu();  // ...and show it in the list
         }
       }

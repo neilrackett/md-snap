@@ -18,6 +18,11 @@ static bool protocolPending = false;
 
 static uint32_t incrementalCmdCount = 0;
 
+enum {
+  CMD_SET_SHARED_VAR = 1,
+  CMD_SET_SHARED_VAR_PAYLOAD_SIZE = 12,  // token + D3 index + D4 value
+};
+
 // Address of the random-token reply slot (chandler_loop publishes the
 // 64-bit { incrementalCmdCount | randomToken } value here so the m68k's
 // send_sync poll wakes up).
@@ -148,6 +153,26 @@ static inline void __not_in_flash_func(chandler_consume_rom3_sample)(
                   handle_protocol_checksum_error);
 }
 
+static inline bool __not_in_flash_func(chandler_handle_shared_var_command)(
+    const TransmissionProtocol *protocol, uint16_t *payloadPtr) {
+  if (protocol->command_id != CMD_SET_SHARED_VAR ||
+      protocol->payload_size != CMD_SET_SHARED_VAR_PAYLOAD_SIZE) {
+    return false;
+  }
+
+  uint32_t index = TPROTO_GET_PAYLOAD_PARAM32(payloadPtr);
+  TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
+  uint32_t value = TPROTO_GET_PAYLOAD_PARAM32(payloadPtr);
+  if (index < CHANDLER_SHARED_VARIABLES_SLOTS) {
+    uint32_t shared_base = (uint32_t)&__rom_in_ram_start__;
+    SET_SHARED_VAR(index, value, shared_base, CHANDLER_SHARED_VARIABLES_OFFSET);
+  } else {
+    DPRINTF("Ignoring shared variable write outside slot range: %lu\n",
+            (unsigned long)index);
+  }
+  return true;
+}
+
 // Invoke this function to process the commands from the active loop in the
 // main function
 void __not_in_flash_func(chandler_loop)() {
@@ -175,8 +200,13 @@ void __not_in_flash_func(chandler_loop)() {
   // Jump the random token
   TPROTO_NEXT32_PAYLOAD_PTR(payloadPtr);
 
-  for (CommandCallbackNode *cur = callbackListHead; cur; cur = cur->next) {
-    if (cur->cb) cur->cb(&pendingProtocol, payloadPtr);
+  bool handledInternally =
+      chandler_handle_shared_var_command(&pendingProtocol, payloadPtr);
+
+  if (!handledInternally) {
+    for (CommandCallbackNode *cur = callbackListHead; cur; cur = cur->next) {
+      if (cur->cb) cur->cb(&pendingProtocol, payloadPtr);
+    }
   }
 
   incrementalCmdCount++;
