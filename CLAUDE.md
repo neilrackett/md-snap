@@ -15,12 +15,14 @@ This repo has been turned into **MD/Snap** — see below.
 MD/Snap captures the Atari ST screen to a `640×400` indexed PNG on the SD card when **SELECT** is
 pressed. Flow: boot menu lists existing `/screenshots/*.png` → **ESC** installs a resident m68k
 grabber and boots to the GEM desktop → **SELECT** captures (snapshot → push over the cartridge window
-→ RP deplanes/pixel-doubles/writes PNG → LED flash). **B** / hold-SELECT-at-boot → Booster.
+→ RP deplanes/pixel-doubles/writes PNG → LED flash). **B** / hold-SELECT-at-boot → Booster. **[H]**
+toggles the capture hook (VBL vs ETV — see below), persisted in the app `MODE` setting.
 
-Key files (beyond the template): `target/atarist/src/userfw.s` (resident VBL grabber + installer),
-`rp/src/screenshot.c` (chunk assembly + deplane + palette decode), `rp/src/png_writer.c` (streaming
-indexed PNG), `rp/src/emul.c` (menu + exit-to-desktop resident service loop), plus reverse-video
-added to `term.c`/`display_term.c` and the SELECT escape hatch in `main.c`.
+Key files (beyond the template): `target/atarist/src/userfw.s` (installer + resident VBL grabber +
+async ETV stream grabber), `rp/src/screenshot.c` (chunk/stream assembly + deplane + palette decode),
+`rp/src/png_writer.c` (streaming indexed PNG), `rp/src/preview_overlay.c` (menu preview thumbnail),
+`rp/src/emul.c` (menu + selection/preview + auto-exit + exit-to-desktop resident service loop), plus
+reverse-video added to `term.c`/`display_term.c` and the SELECT escape hatch in `main.c`.
 
 ### Hard-won gotchas (these cost real debugging time — don't relearn them)
 
@@ -39,8 +41,9 @@ added to `term.c`/`display_term.c` and the SELECT escape hatch in `main.c`.
 - **Resident code calls the ROM transport via absolute `jsr`,** not `bsr` — a PC-relative `bsr` from
   the RAM copy can't reach `send_sync_write_command_to_sidecart` in ROM. The symbol is `xdef`'d in
   `main.s` and `xref`'d in `userfw.s`.
-- **Protocol payload cap is ~2048 B**, so the 32000-byte screen is pushed as 16×2000-byte chunks plus a
-  BEGIN metadata command; the grabber dribbles one chunk per VBL frame.
+- **Protocol payload cap is ~2048 B.** VBL mode pushes the 32000-byte screen as 16×2000-byte chunks
+  plus a BEGIN metadata command (one chunk per VBL frame). ETV mode streams it as 64×500-byte frames
+  plus a STREAM_BEGIN (see the capture-hooks section).
 - **No RTC / no wall clock:** the RP has no battery clock and we don't fetch NTP. Filenames are
   sequential `snap_NNNN_<low|medium|high>.png` (RP scans the folder for the next free index). Do not
   reintroduce timestamped names without a real time source.
@@ -53,26 +56,41 @@ added to `term.c`/`display_term.c` and the SELECT escape hatch in `main.c`.
 - **The RP never resets after exit-to-desktop** — it stays resident forever (serving ROM4 via DMA,
   polling SELECT, writing PNGs). Short SELECT = capture; long press (`SELECT_LONG_RESET`) = Booster.
 
-### In-game capture — investigated, hard limit (read before trying again)
+### Capture hooks — VBL (sync) and ETV (async stream)
 
 The cartridge (ROM) port has **no IRQ line and no bus-master line** — it's a passive slave. So the RP
 can never force the 68000 to run our code or read ST RAM itself; the grabber only runs when a *system
-interrupt vector we hooked* is still pointed at us **and** being serviced. Consequences:
-- Desktop, GEM apps, resolution changes, and "system-friendly" games (keep TOS's VBL) capture fine.
-- **Full-takeover games** (replace all vectors / run interrupts-masked at IPL 7 / bang hardware) cannot
-  be captured from the cartridge by *any* means — that needs downstream hardware capture (RGBtoHDMI).
-- **Two timer-C-driven hooks were tried to reach VBL-replacing programs; BOTH froze the ST.** (1) the
-  raw MFP Timer C autovector `$114`, and (2) the *supported* `etv_timer` vector `$400` (selectable via
-  an `[H]` VBL/ETV menu toggle, rate-limited to ~50 Hz). Same symptom each time: `Screenshot BEGIN`
-  repeating forever with no DATA + a frozen foreground — the capture's blocking multi-chunk handshake
-  transport wedges inside the 200 Hz timer-C ISR before the state machine can advance, and the timer
-  keeps re-firing the handler. **Lesson: never run the heavy/blocking capture from Timer C / the
-  system-clock ISR — VBL (`$70`) is the ceiling for this capture design.** (md-devops hooks
-  `etv_timer` fine only because its handler is *lightweight* — poll a sentinel, dispatch tiny bounded
-  commands — never a blocking transport. See `md-devops/.../runner.s`.) Programs that replace the VBL
-  therefore can't be captured; that's RGBtoHDMI territory. The `[H]` VBL/ETV toggle (`HOOK_FLAG_ADDR`
-  slot 4 + the etv_timer install path) is **preserved on the `feat/etv` branch as an experiment** and
-  must NOT be merged to the stable line — VBL-only is what ships.
+interrupt vector we hooked* is still pointed at us **and** serviced. There are **two hooks**, chosen by
+`[H]` (RP publishes the choice to `HOOK_FLAG_ADDR`, shared-var slot 4; persisted in app `MODE`). The
+installer in `userfw.s` hooks one or the other; the handler bodies are separate.
+
+- **VBL (`$70`) — synchronous, fast (instant).** The resident handler runs the *blocking* transport
+  (`send_sync_write_command_to_sidecart`, RANDOM_TOKEN handshake) and dribbles 16×2000-byte chunks one
+  per VBL frame. Captures the desktop, GEM apps, res changes, and "system-friendly" programs that keep
+  TOS's VBL.
+- **ETV (`etv_timer` `$400`) — async stream, slower (~1–2 s).** Reaches programs that replace the VBL
+  but keep TOS's 200 Hz timer-C (so `etv_timer`, which TOS calls from the timer-C ISR, still fires).
+  This is the hook that extends reach to many games.
+
+**Why ETV took two failed tries first, and what made it work.** Earlier attempts hooked Timer C
+(`$114`) and `etv_timer` (`$400`) but ran the *blocking* multi-chunk handshake transport inside that
+200 Hz ISR — both **froze the ST** (`Screenshot BEGIN` repeating forever, frozen foreground: the
+blocking wait wedges the timer ISR before the state machine can advance). The fix is to keep the timer
+handler **non-blocking**: `resident_etv_start` is a state machine that snapshots once, then per tick
+emits **one bounded 500-byte frame** via `etv_async_write` (same ROM3 protocol as the sync transport
+but **skips the RANDOM_TOKEN wait**) and returns immediately. Flow control is external: the RP publishes
+credit to `STREAM_ACK_ADDR` (slot 5 = `seq<<16 | next_frame`) and the handler only sends the next of
+the 64 frames when credit advances; `ETV_RETRY_TICKS` (~100 ms) resends, `ETV_ABORT_TICKS` (~4 s) gives
+up. **Lesson: never *block* in the timer ISR — an async, credit-flow-controlled stream is what makes a
+timer-C-driven hook safe** (this is the lightweight-handler discipline md-devops uses).
+
+- **Mega STE cache guard.** ROM3 is read-as-side-effect; on a 16 MHz Mega STE with cache enabled those
+  reads can be served from cache and never reach the RP. `cache_guard_begin`/`_end` clear only bit 0 of
+  `$FFFF8E21` (preserving the other MSTE_CC bits) around the protocol reads, for `_MCH == Mega STE`
+  only, and restore it after. Both `call_transport` (VBL) and `etv_async_write` (ETV) wrap their reads.
+- **Still uncapturable:** programs that replace/disable *both* the VBL and `etv_timer`/timer-C, run
+  interrupts-masked at IPL 7, or bang hardware directly — that's downstream hardware capture (RGBtoHDMI)
+  territory.
 
 ### Build tooling changes vs the stock template
 
