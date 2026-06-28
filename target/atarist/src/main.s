@@ -1,3 +1,6 @@
+; Copyright (C) 2026 Neil Rackett
+; SPDX-License-Identifier: GPL-3.0-or-later
+
 ; Firmware loader from cartridge
 ; (C) 2023-2025 by Diego Parrilla
 ; License: GPL v3

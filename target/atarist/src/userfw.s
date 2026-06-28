@@ -1,3 +1,6 @@
+; Copyright (C) 2026 Neil Rackett
+; SPDX-License-Identifier: GPL-3.0-or-later
+
 ; MD/Snap user firmware: resident screen grabber.
 ; (C) 2026 Neil Rackett
 ; License: GPL v3
