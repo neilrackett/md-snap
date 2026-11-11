@@ -37,6 +37,7 @@ PICO_TOOLCHAIN_PATH=/Applications/ArmGNUToolchain/14.2.rel1/arm-none-eabi/bin \
 - Expect harmless VASM warnings (`target data type overflow`, `trailing garbage after option -D`).
 - The build script auto-copies `version.txt`, rebuilds the Atari target, then the RP target.
 - Successful builds drop UF2s into `dist/` as `<UUID>-v<version>.uf2` and print the MD5 used in the generated JSON manifest.
+- **Every push to `main` is a release** (`.github/workflows/release.yml`): `make` with the `APP_UUID_KEY` secret, a tag named from `version.txt` (left alone if it already exists), the `latest` tag moved to the commit, and the UF2 + JSON replaced on the `latest` GitHub Release. A push that only changes `**.md` is skipped (run the workflow by hand to release one anyway). `make build`, which CI runs, releases `version.txt` as-is and `make debug` bumps it, so bump it before pushing a new version. `.github/workflows/pr.yml` builds pull requests to `main` and publishes nothing.
 - The Atari cartridge image (header + m68k code) must fit in 8 KB; `target/atarist/build.sh` enforces this against `BOOT.BIN` and aborts if exceeded. The 8 KB matches `CHANDLER_CARTRIDGE_CODE_SIZE` in `rp/src/include/chandler.h` and `CARTRIDGE_CODE_SIZE` in `target/atarist/src/main.s`.
 - FatFs configuration lives at `rp/src/ff/ffconf.h`. `rp/src/CMakeLists.txt` puts that directory ahead of the `fatfs-sdk` include path with `target_include_directories(... BEFORE PRIVATE)`, so the override wins and the submodule stays clean. Do not edit the submodule's copy.
 
