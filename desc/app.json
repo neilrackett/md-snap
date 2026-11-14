@@ -1,7 +1,7 @@
 {
   "uuid": "<APP_UUID>",
   "name": "MD/Snap",
-  "description": "Capture Atari ST screenshots to your SidecarT's SD card by pressing the SELECT button. For more information, visit <a href=\"https://neilrackett.com/atarist\">neilrackett.com</a>.",
+  "description": "MD/Snap turns your SidecarTridge Multi-device into a screenshot button for your Atari ST: press SELECT and the current screen is saved as a 640×400 PNG on the SD card. It works in every ST resolution and corrects the aspect ratio for you. Find out more at <a href=\"https://neilrackett.com/atarist/md-snap\">neilrackett.com</a>.",
   "image": "https://downloads.neilrackett.com/md-snap/image.webp",
   "tags": [
     "Screenshot"
