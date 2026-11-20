@@ -63,6 +63,8 @@ PALETTE_ADDR		equ $FFFF8240
 ; gets the first 2 KB ($0000..$07FF), userfw gets the next 6 KB
 ; ($0800..$1FFF). The CARTRIDGE_CODE_SIZE = 8 KB cap covers both.
 USERFW			equ (ROM4_ADDR + $800)				; $FA0800
+TTMENU_REZ		equ (ROM4_ADDR + $1800)				; ttmenu.s: choose a TT's menu mode
+TTMENU_DRAW		equ (ROM4_ADDR + $1804)				; ttmenu.s: draw it
 
 SCREEN_SIZE			equ (-4096)	; Use the memory before the screen memory to store the copied code
 COLS_HIGH			equ 20		; 16 bit columns in the ST
@@ -326,8 +328,12 @@ start_rom_code:
 
 ; Get the resolution of the screen (see get_rez_checked). Anything but
 ; high res is switched to low res before the RP is told, so the menu and
-; its preview are drawn for the resolution actually on screen. TT high
-; is left alone: its mono monitor cannot show low res.
+; its preview are drawn for the resolution actually on screen. A TT is
+; switched to TT low instead, for a 256-colour preview, unless it is in
+; ST high or TT high (ttmenu.s).
+	jsr TTMENU_REZ				; a TT: d0 = 2, 6 or 7; anything else: -1
+	tst.w d0
+	bpl.s .rez_ok
 	get_rez_checked
 	cmp.w #2, d0
 	beq.s .rez_ok
@@ -345,6 +351,8 @@ start_rom_code:
 	send_sync CMD_SET_SHARED_VAR, 8
 	cmp.w #2, d5				; Check if the resolution is 640x400 (high resolution)
 	beq .print_loop_high		; If it is, print the message in high resolution
+	cmp.w #6, d5				; TT high (6) or TT low (7): ttmenu.s draws it
+	bhs .print_loop_tt
 
 .print_loop_low:
 	vsync_wait
@@ -429,6 +437,19 @@ start_rom_code:
 
 	bra .print_loop_high		; Continue printing the message
 	
+.print_loop_tt:
+	vsync_wait
+	move.b MENU_FRAME_SEQ_ADDR, d0
+	lea menu_draw_seq(pc), a5
+	cmp.b (a5), d0
+	beq .poll_tt
+	move.b d0, (a5)
+	move.l a6, a0				; the screen
+	jsr TTMENU_DRAW
+.poll_tt:
+	check_commands
+	bra .print_loop_tt
+
 .reset:
     move.l #PRE_RESET_WAIT, d6
 .wait_me:

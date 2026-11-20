@@ -48,7 +48,8 @@
 #define HOOK_MODE_MENU 255
 #define SHARED_VAR_MENU_REZ 6
 #define SHARED_VAR_MENU_FRAME 7
-#define ST_REZ_HIGH 2
+#define MENU_REZ_ST_LOW 0  // the m68k's menu: ST low, or a TT's TT low
+#define MENU_REZ_TT_LOW 7
 
 // Box-drawing glyph in u8g2_font_amstrad_cpc_extended_8f (horizontal rule).
 #define GLYPH_H ((char)129)
@@ -92,6 +93,7 @@ static volatile bool hookToggleReq = false;
 static volatile bool previewToggleReq = false;
 static bool previewVisible = false;
 static bool previewAvailable = true;
+static bool menuTtLow = false;  // the menu is in TT low: a 256-colour preview
 static bool previewOverlayActive = false;
 static int previewOverlayIndex = -1;
 static uint8_t menuFrameSeq = 0;
@@ -206,15 +208,21 @@ static void clampSelection(void) {
 
 static bool updatePreviewAvailability(void) {
   bool wasAvailable = previewAvailable;
+  bool wasTtLow = menuTtLow;
   uint32_t rez = readSharedVar(SHARED_VAR_MENU_REZ);
-  previewAvailable = (rez != ST_REZ_HIGH);
-  if (!previewAvailable) {
-    previewVisible = false;
+  // Colour menus only: ST low, or TT low on a TT. ST high and TT high are mono.
+  previewAvailable = (rez == MENU_REZ_ST_LOW || rez == MENU_REZ_TT_LOW);
+  menuTtLow = (rez == MENU_REZ_TT_LOW);
+  if (!previewAvailable || menuTtLow != wasTtLow) {
+    // Gone, or now wanted in the other layout: drop the one drawn.
+    if (!previewAvailable) {
+      previewVisible = false;
+    }
     preview_overlay_disable();
     previewOverlayActive = false;
     previewOverlayIndex = -1;
   }
-  return previewAvailable != wasAvailable;
+  return previewAvailable != wasAvailable || menuTtLow != wasTtLow;
 }
 
 // --- menu rendering ------------------------------------------------------
@@ -267,8 +275,8 @@ static void syncPreviewOverlay(void) {
     return;
   }
 
-  previewOverlayActive =
-      preview_overlay_show(SCREENSHOT_FOLDER, shotNames[selectedIndex]);
+  previewOverlayActive = preview_overlay_show(
+      SCREENSHOT_FOLDER, shotNames[selectedIndex], menuTtLow);
   previewOverlayIndex = selectedIndex;
 }
 

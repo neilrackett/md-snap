@@ -10,7 +10,8 @@
  * script asserts this against BOOT.BIN):
  *
  *   .text_main    0x0000..0x07FF  ( 2 KB)  m68k boot + dispatch
- *   .text_userfw  0x0800..0x1FFF  ( 6 KB)  user firmware module
+ *   .text_userfw  0x0800..0x17FF  ( 4 KB)  user firmware module
+ *   .text_ttmenu  0x1800..0x1FFF  ( 2 KB)  the menu on a TT (ttmenu.s)
  *
  * Adding a new module is a two-step change:
  *   1. Pick an offset within the remaining cartridge budget and add a
@@ -26,5 +27,9 @@ SECTIONS
 
     .text_userfw 0x000800 : {
         userfw.o(.text)
+    }
+
+    .text_ttmenu 0x001800 : {
+        ttmenu.o(.text)
     }
 }

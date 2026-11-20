@@ -54,7 +54,7 @@ release: prepare dist
 prepare: clean
 	mkdir -p $(BUILD_DIR)
 
-clean-compile : clean main.o userfw.o
+clean-compile : clean main.o userfw.o ttmenu.o
 
 main.o: prepare
 	$(VASM) $(VASMFLAGS) $(SOURCES_DIR)/main.s -o $(BUILD_DIR)/main.o
@@ -62,8 +62,11 @@ main.o: prepare
 userfw.o: prepare
 	$(VASM) $(VASMFLAGS) $(SOURCES_DIR)/userfw.s -o $(BUILD_DIR)/userfw.o
 
+ttmenu.o: prepare
+	$(VASM) $(VASMFLAGS) $(SOURCES_DIR)/ttmenu.s -o $(BUILD_DIR)/ttmenu.o
+
 .PHONY: build
-build: main.o userfw.o
+build: main.o userfw.o ttmenu.o
 	$(VLINK) $(addprefix $(BUILD_DIR)/,$^) $(VLINKFLAGS) -o $(BUILD_DIR)/$(BIN)
 
 

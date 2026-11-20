@@ -19,7 +19,8 @@ grabber and boots to the GEM desktop → **SELECT** captures (snapshot → push 
 toggles the capture hook (VBL vs ETV — see below), persisted in the app `MODE` setting.
 
 Key files (beyond the template): `target/atarist/src/userfw.s` (installer + resident VBL grabber +
-async ETV stream grabber), `rp/src/screenshot.c` (chunk/stream assembly + deplane + palette decode),
+async ETV stream grabber), `target/atarist/src/ttmenu.s` (the menu on a TT: TT low with a 256-colour
+preview, or TT high drawn 4x), `rp/src/screenshot.c` (chunk/stream assembly + deplane + palette decode),
 `rp/src/png_writer.c` (streaming indexed PNG), `rp/src/preview_overlay.c` (menu preview thumbnail),
 `rp/src/emul.c` (menu + selection/preview + auto-exit + exit-to-desktop resident service loop), plus
 reverse-video added to `term.c`/`display_term.c` and the SELECT escape hatch in `main.c`.
@@ -44,6 +45,16 @@ reverse-video added to `term.c`/`display_term.c` and the SELECT escape hatch in 
 - **Protocol payload cap is ~2048 B.** VBL mode pushes the 32000-byte screen as 16×2000-byte chunks
   plus a BEGIN metadata command (one chunk per VBL frame). ETV mode streams it as 64×500-byte frames
   plus a STREAM_BEGIN (see the capture-hooks section).
+- **The menu on a TT (`ttmenu.s`).** `TTMENU_REZ` switches a colour TT to TT low (7) unless it is in
+  ST high or TT high, and reports 7 as the menu rez (shared-var slot 6). `TTMENU_DRAW` reads `$FF8262`:
+  TT low draws the 320x200 menu into 8 planes with each line doubled, centred (40-line borders), plus a
+  144x180 8-plane preview and a 256-word TT palette (`preview_overlay.c`, `forTtLow`; entries 0/255 are
+  kept white/black for the menu text); TT high draws it 4x (1280x800, 80-line borders), no preview.
+  A screenshot of fewer than 256 colours is box-filtered into the TT preview (dithers show as the colour
+  they make): pass 1 counts the 12-bit averages in `tally[4096]` (8 KB), the 254 most used become the
+  palette and the rest map to the nearest, pass 2 draws. 256-colour ones stay pixel-for-pixel.
+  The menu code relocates to 4 KB *below* the screen, so the 153600-byte TT screen doesn't reach it.
+  Offsets past +32767 need `adda.l`, not a `lea` displacement (68000).
 - **TT support (`_MCH` $0002xxxx):** the grabber sends the whole `$FF8262` shifter word as "rez" (mode
   bits 8-10, ST palette bank bits 0-3) plus all 256 TT palette words (`$FF8400`, plain `0RGB` 4-bit —
   NOT the STE bit order), and reads the `$FF820D` base low byte. ST modes on a TT stay 32000 bytes and
@@ -177,7 +188,7 @@ The firmware is a **two-target build**: m68k assembly that runs on the Atari ST 
 
 ### Atari ST side (`target/atarist/`)
 - `src/main.s` — m68k cartridge boot + dispatch + terminal. Lives at `$FA0000` in the ST address space (ROM4 cartridge region). Defines the cartridge header (`CA_MAGIC`, `CA_INIT`, …), command magic numbers, and the shared-variable layout used to talk to the RP2040.
-- `src/userfw.s` — **the primary extension point for app-specific m68k code.** `src/userfw.ld` places `main.s` at offset `0x0000` (2 KB budget) and `userfw.s` at offset `0x0800` (6 KB budget); `main.s` exposes the latter as `USERFW equ (ROM4_ADDR + $800)`. When the RP-side terminal command `f` ([F]irmware) is selected, the RP writes `CMD_START = 4` to the cartridge sentinel; the m68k's vsync-polled `check_commands` dispatches to `rom_function`, which `jmp`s to `USERFW`. The default `userfw.s` is a Cconws demo — replace its body with your own logic.
+- `src/userfw.s` — **the primary extension point for app-specific m68k code.** `src/userfw.ld` places `main.s` at offset `0x0000` (2 KB budget, nearly full), `userfw.s` at offset `0x0800` (4 KB budget) and `ttmenu.s` at `0x1800` (2 KB; `TTMENU_REZ`/`TTMENU_DRAW` in `main.s`); `main.s` exposes the latter as `USERFW equ (ROM4_ADDR + $800)`. When the RP-side terminal command `f` ([F]irmware) is selected, the RP writes `CMD_START = 4` to the cartridge sentinel; the m68k's vsync-polled `check_commands` dispatches to `rom_function`, which `jmp`s to `USERFW`. The default `userfw.s` is a Cconws demo — replace its body with your own logic.
 - Adding more m68k modules: add a new `.text_<name>` section in `userfw.ld`, mirror the offset with an `equ (ROM4_ADDR + $????)` in `main.s`, and add the `.o` target to `target/atarist/Makefile` (same pattern as `gemdrive.ld` in `md-drives-emulator`).
 - Built via `stcmd make release` (m68k assembler in Docker); the cartridge image (header + all `.text_*` sections) must fit in 8 KB. A 64 KB padded copy is then converted to `target_firmware.h` for inclusion in the RP build.
 
