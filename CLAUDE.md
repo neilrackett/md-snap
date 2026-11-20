@@ -90,18 +90,21 @@ installer in `userfw.s` hooks one or the other; the handler bodies are separate.
   TOS's VBL.
 - **ETV (`etv_timer` `$400`) — async stream, slower (~1–2 s).** Reaches programs that replace the VBL
   but keep TOS's 200 Hz timer-C (so `etv_timer`, which TOS calls from the timer-C ISR, still fires).
+  **`etv_timer` runs at 50 Hz, not 200:** TOS calls it on every fourth timer C interrupt, every 20 ms
+  (`_timr_ms`, `$442`; confirmed on hardware). Tick counts in `userfw.s` are 20 ms each.
   This is the hook that extends reach to many games.
 
 **Why ETV took two failed tries first, and what made it work.** Earlier attempts hooked Timer C
 (`$114`) and `etv_timer` (`$400`) but ran the *blocking* multi-chunk handshake transport inside that
-200 Hz ISR — both **froze the ST** (`Screenshot BEGIN` repeating forever, frozen foreground: the
+timer ISR — both **froze the ST** (`Screenshot BEGIN` repeating forever, frozen foreground: the
 blocking wait wedges the timer ISR before the state machine can advance). The fix is to keep the timer
 handler **non-blocking**: `resident_etv_start` is a state machine that snapshots once, then per tick
-emits **one bounded 500-byte frame** via `etv_async_write` (same ROM3 protocol as the sync transport
+emits **one bounded frame** (500 bytes; 960 for a TT mode) via `etv_async_write` (same ROM3 protocol as the sync transport
 but **skips the RANDOM_TOKEN wait**) and returns immediately. Flow control is external: the RP publishes
-credit to `STREAM_ACK_ADDR` (slot 5 = `seq<<16 | next_frame`) and the handler only sends the next of
-the 64 frames when credit advances; `ETV_RETRY_TICKS` (~100 ms) resends, `ETV_ABORT_TICKS` (~4 s) gives
-up. **Lesson: never *block* in the timer ISR — an async, credit-flow-controlled stream is what makes a
+credit to `STREAM_ACK_ADDR` (slot 5 = `seq<<16 | next_frame`) and the handler sends the next of the
+64 frames (160 for a TT mode) in the same tick that sees credit advance, so at most a frame a tick
+(50 a second: ~1.3 s for an ST screen, ~3.2 s for a TT one); `ETV_RETRY_TICKS` (5, 100 ms) resends,
+`ETV_ABORT_TICKS` (200, 4 s) gives up. **Lesson: never *block* in the timer ISR — an async, credit-flow-controlled stream is what makes a
 timer-C-driven hook safe** (this is the lightweight-handler discipline md-devops uses).
 
 - **68030 data cache (TT, Falcon).** When `_CPU` is 30 the installer sets `res_030`; each resident tick

@@ -107,8 +107,10 @@ TT_NUM_CHUNKS		equ 80
 TT_STREAM_FRAME_SIZE	equ 960		; ETV: 160 frames (3 rows of 320 / 6 of 160)
 TT_STREAM_FRAME_COUNT	equ 160
 RES_RETRIES			equ 3			; transport retries per chunk
-ETV_RETRY_TICKS	equ 20			; 20 * 5 ms = about 100 ms
-ETV_ABORT_TICKS	equ 800			; 800 * 5 ms = about 4 seconds
+; TOS calls etv_timer on every fourth 200 Hz timer C interrupt: every 20 ms
+; (_timr_ms), 50 times a second.
+ETV_RETRY_TICKS	equ 5			; 5 * 20 ms = 100 ms
+ETV_ABORT_TICKS	equ 200			; 200 * 20 ms = 4 seconds
 
 ; The write transport lives in main.s (ROM). Imported so the resident RAM copy
 ; can call it via an absolute-address jsr.
@@ -590,8 +592,7 @@ resident_etv_start:
 	clr.w	etv_frame-resident_etv_start(a5)
 	clr.w	etv_retry-resident_etv_start(a5)
 	clr.w	etv_timeout-resident_etv_start(a5)
-	move.b	#3, etv_state-resident_etv_start(a5)
-	bra		.etv_chain
+	bra.s	.etv_send_frame_state	; credit for frame 0: send it this tick
 .etv_wait_begin_retry:
 	bsr		etv_wait_tick
 	tst.w	d0
@@ -618,8 +619,9 @@ resident_etv_start:
 	clr.w	etv_timeout-resident_etv_start(a5)
 	cmp.w	res_nframes(pc), d2
 	bhs.s	.etv_abort
-	move.b	#3, etv_state-resident_etv_start(a5)
-	bra		.etv_chain
+	bra.s	.etv_send_frame_state	; credit for the next frame: send it this
+									; tick, a frame a tick rather than one
+									; every other tick
 .etv_wait_frame_retry:
 	bsr		etv_wait_tick
 	tst.w	d0
