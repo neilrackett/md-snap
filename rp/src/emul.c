@@ -10,7 +10,8 @@
  * License: GPL v3
  * Description: MD/Snap core. A boot menu lists the screenshots already on the
  * SD card; exiting to the desktop installs the resident m68k grabber and the
- * RP then services SELECT-triggered screen captures, writing 640x400 PNGs.
+ * RP then services SELECT-triggered screen captures, writing 640x400 PNGs
+ * (640x480 / 1280x960 in a TT's own modes).
  */
 
 #include "emul.h"
@@ -99,7 +100,7 @@ static FATFS fsys;
 static bool sdReady = false;
 
 static uint32_t readSharedVar(uint8_t index) {
-  uint32_t base = (uint32_t)&__rom_in_ram_start__;
+  uintptr_t base = (uintptr_t)&__rom_in_ram_start__;
   uint16_t high =
       *((volatile uint16_t *)(base + CHANDLER_SHARED_VARIABLES_OFFSET +
                               (index * 4)));
@@ -110,7 +111,7 @@ static uint32_t readSharedVar(uint8_t index) {
 }
 
 static void writeSharedVar(uint8_t index, uint32_t value) {
-  uint32_t base = (uint32_t)&__rom_in_ram_start__;
+  uintptr_t base = (uintptr_t)&__rom_in_ram_start__;
   *((volatile uint16_t *)(base + CHANDLER_SHARED_VARIABLES_OFFSET +
                           (index * 4) + 2)) = value & 0xFFFF;
   *((volatile uint16_t *)(base + CHANDLER_SHARED_VARIABLES_OFFSET +
@@ -489,7 +490,7 @@ static void gotoBooster(void) {
 // Install the resident grabber on the ST, boot to the desktop, then service
 // SELECT-triggered captures forever. Never returns.
 static void exitToDesktop(void) {
-  uint32_t romBase = (uint32_t)&__rom_in_ram_start__;
+  uintptr_t romBase = (uintptr_t)&__rom_in_ram_start__;
   DPRINTF("MD/Snap: exitToDesktop - installing grabber (hook=%s) and booting\n",
           g_hookEtv ? "ETV" : "VBL");
   term_setRawKeyCallback(NULL);
@@ -566,7 +567,7 @@ void emul_start() {
   // could read as a spurious RESET/BOOT_GEM/START before the first display NOP.
   *((volatile uint32_t *)((uintptr_t)&__rom_in_ram_start__ +
                           CHANDLER_CMD_SENTINEL_OFFSET)) = 0;
-  SET_SHARED_VAR(SHARED_VAR_MENU_REZ, 0, (uint32_t)&__rom_in_ram_start__,
+  SET_SHARED_VAR(SHARED_VAR_MENU_REZ, 0, (uintptr_t)&__rom_in_ram_start__,
                  CHANDLER_SHARED_VARIABLES_OFFSET);
   writeSharedVar(SHARED_VAR_MENU_FRAME, 0);
 

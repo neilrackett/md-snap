@@ -95,7 +95,8 @@ static void png_chunk(png_writer_t *pw, const char *type, const uint8_t *data,
 
 // --- public API ---------------------------------------------------------
 bool png_writer_begin(png_writer_t *pw, FIL *f, uint16_t width, uint16_t height,
-                      const uint8_t palette[][3], uint16_t ncolors) {
+                      const uint8_t palette[][3], uint16_t ncolors,
+                      uint8_t bit_depth) {
   memset(pw, 0, sizeof(*pw));
   pw->f = f;
   pw->adler_a = 1;
@@ -104,32 +105,27 @@ bool png_writer_begin(png_writer_t *pw, FIL *f, uint16_t width, uint16_t height,
   static const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
   png_raw(pw, sig, sizeof(sig));
 
-  // IHDR: width, height, bit depth 8, colour type 3 (indexed), no interlace.
+  // IHDR: width, height, bit depth, colour type 3 (indexed), no interlace.
   uint8_t ihdr[13];
   be32(ihdr, width);
   be32(ihdr + 4, height);
-  ihdr[8] = 8;   // bit depth
+  ihdr[8] = bit_depth;
   ihdr[9] = 3;   // colour type: indexed
   ihdr[10] = 0;  // compression
   ihdr[11] = 0;  // filter
   ihdr[12] = 0;  // interlace
   png_chunk(pw, "IHDR", ihdr, sizeof(ihdr));
 
-  // PLTE: ncolors RGB triplets.
-  uint8_t plte[PNG_MAX_COLORS * 3];
+  // PLTE: ncolors RGB triplets (palette[][3] is already laid out that way).
   if (ncolors > PNG_MAX_COLORS) {
     ncolors = PNG_MAX_COLORS;
   }
-  for (uint16_t i = 0; i < ncolors; i++) {
-    plte[i * 3 + 0] = palette[i][0];
-    plte[i * 3 + 1] = palette[i][1];
-    plte[i * 3 + 2] = palette[i][2];
-  }
-  png_chunk(pw, "PLTE", plte, (uint32_t)ncolors * 3);
+  png_chunk(pw, "PLTE", &palette[0][0], (uint32_t)ncolors * 3);
 
   // IDAT: zlib stream of stored DEFLATE blocks. Compute the total data length
   // up front so the chunk length can be written before streaming.
-  uint32_t raw = (uint32_t)height * (1u + width);  // filter byte + row per line
+  uint32_t row_bytes = ((uint32_t)width * bit_depth + 7u) / 8u;
+  uint32_t raw = (uint32_t)height * (1u + row_bytes);  // filter byte + row
   uint32_t num_blocks =
       (raw + PNG_STORED_BLOCK_MAX - 1) / PNG_STORED_BLOCK_MAX;
   if (num_blocks == 0) {
@@ -180,12 +176,12 @@ static void png_emit_raw_byte(png_writer_t *pw, uint8_t byte) {
   pw->adler_b = (pw->adler_b + pw->adler_a) % 65521u;
 }
 
-bool png_writer_row(png_writer_t *pw, const uint8_t *indices, uint16_t width) {
+bool png_writer_row(png_writer_t *pw, const uint8_t *indices, uint16_t len) {
   if (pw->error) {
     return false;
   }
   png_emit_raw_byte(pw, 0);  // PNG filter type 0 (None)
-  for (uint16_t i = 0; i < width; i++) {
+  for (uint16_t i = 0; i < len; i++) {
     png_emit_raw_byte(pw, indices[i]);
   }
   return !pw->error;

@@ -14,6 +14,8 @@ When the app starts you'll see a list of the screenshots you've already taken. P
 
 It works in all ST resolutions (low, medium and high) and corrects the aspect ratio for you, so the saved 640×400 image looks like what you see on screen rather than squashed pixels.
 
+On a TT it also works in TT low, medium and high: TT low (320×480, 256 colours) is saved as 640×480, TT medium as 640×480 and TT high as a 1280×960 mono PNG. A TT screen is nearly five times the size of an ST one, so it takes a little longer to save.
+
 ## Installation
 
 1. Download the latest files from the [releases page](https://github.com/neilrackett/md-snap/releases).
@@ -32,6 +34,20 @@ You can choose between 2 screen capture modes:
 
 - Anything that replaces VBL, ETV or Timer C will block the screen grabber, so it may not work in all games.
 - It doesn't work for apps that bypass standard screen layout, for example overscan or sync-scrolling.
+
+## Running it on your computer
+
+MD/Snap also runs in [Hatari](https://www.hatari-emu.org) on your Mac or Linux PC, with [EmuMD](https://github.com/neilrackett/emumd) standing in for the Multi-device and `build/sd` for its microSD card:
+
+```bash
+git submodule update --init emu/emumd
+emu/emumd/tools/mdfw hatari   # once: the Hatari that runs it, and EmuTOS
+make emu                      # build build/md-snap.mdfw and run it on an STE
+make emu MACHINE=tt TOS=~/.cache/emumd/emutos-512k-1.4/etos512uk.img   # on a TT
+make emu RECORD=mdsnap.avi    # recording picture and sound until you quit
+```
+
+EmuMD doesn't have a SELECT button yet, so for now you can try the menu and boot to the desktop, but not take a screenshot. It needs libslirp for the template's network code (`brew install libslirp pkg-config`, or `sudo apt install libslirp-dev libglib2.0-dev pkg-config`). See [EmuMD's guide](https://github.com/neilrackett/emumd/blob/main/docs/GUIDE.md) for more.
 
 ## What's next?
 

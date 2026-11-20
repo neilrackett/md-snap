@@ -44,6 +44,15 @@ reverse-video added to `term.c`/`display_term.c` and the SELECT escape hatch in 
 - **Protocol payload cap is ~2048 B.** VBL mode pushes the 32000-byte screen as 16×2000-byte chunks
   plus a BEGIN metadata command (one chunk per VBL frame). ETV mode streams it as 64×500-byte frames
   plus a STREAM_BEGIN (see the capture-hooks section).
+- **TT support (`_MCH` $0002xxxx):** the grabber sends the whole `$FF8262` shifter word as "rez" (mode
+  bits 8-10, ST palette bank bits 0-3) plus all 256 TT palette words (`$FF8400`, plain `0RGB` 4-bit —
+  NOT the STE bit order), and reads the `$FF820D` base low byte. ST modes on a TT stay 32000 bytes and
+  use the buffered path (colours from the bank; ST high = entries 254/255, swapped by bit 1 of entry 0).
+  TT low/med/high are 153600 bytes — too big for the RP's ~44 KB of free RAM — so they go as 80×1920 B
+  (VBL) / 160×960 B (ETV) whole-row chunks and the RP **writes PNG rows from inside the command
+  callback**, before the reply token/credit goes out; that is the backpressure. `chandler` has a single
+  pending slot, so chunks must arrive in order: repeats are skipped, a gap drops the capture. TT high is
+  written as a 1-bit PNG. The installer `Mxalloc`s the 154 KB snapshot buffer preferring TT-RAM.
 - **No RTC / no wall clock:** the RP has no battery clock and we don't fetch NTP. Filenames are
   sequential `snap_NNNN_<low|medium|high>.png` (RP scans the folder for the next free index). Do not
   reintroduce timestamped names without a real time source.
@@ -84,6 +93,11 @@ the 64 frames when credit advances; `ETV_RETRY_TICKS` (~100 ms) resends, `ETV_AB
 up. **Lesson: never *block* in the timer ISR — an async, credit-flow-controlled stream is what makes a
 timer-C-driven hook safe** (this is the lightweight-handler discipline md-devops uses).
 
+- **68030 data cache (TT, Falcon).** When `_CPU` is 30 the installer sets `res_030`; each resident tick
+  empties the data cache (`dcache_flush`, CACR CD) so the capture counter and stream credit are read
+  from the RP, and `cache_guard_begin/_end` turn the data cache off (CACR ED) around the protocol
+  reads and the sync transport's reply-token wait. `movec` is hand-assembled (`dc.w`) as the file is
+  built for the 68000. Defensive: Hatari did not show the stale reads either way.
 - **Mega STE cache guard.** ROM3 is read-as-side-effect; on a 16 MHz Mega STE with cache enabled those
   reads can be served from cache and never reach the RP. `cache_guard_begin`/`_end` clear only bit 0 of
   `$FFFF8E21` (preserving the other MSTE_CC bits) around the protocol reads, for `_MCH == Mega STE`
@@ -148,7 +162,14 @@ Build flow (orchestrated by `build.sh`):
 - `upload_s3.sh <file>` is a manual one-off uploader; needs `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
 
 ### Tests
-There is no test suite. "Verification" is: build succeeds, UF2 boots on hardware, manual interaction over the serial debug console.
+There is no test suite. "Verification" is: build succeeds, UF2 boots on hardware, manual interaction over the serial debug console — and, short of hardware, running it in Hatari with EmuMD (below).
+
+### EmuMD (Hatari on this computer)
+`emu/emumd` is a submodule; `mdfw.ini` builds `build/md-snap.mdfw` with `template = sidecartridge`; `make emu` runs it (`emu/emu.mk`). How-to and gotchas are in AGENTS.md §3a. The ones that cost time:
+- EmuMD never presses SELECT (`select_detectPush()` is always false), so captures can't be triggered there yet.
+- Hatari's `--tos-res` turns on Hatari's **own** cartridge, so MD/Snap's never boots (no menu, no grabber). Set a TT's resolution with a floppy `NEWDESK.INF` instead; TT high is `--monitor mono`.
+- EmuMD's RP is infinitely fast, so the VBL transport never waits and ETV's credit loop runs at ~3 frames/s; neither says anything about real timing.
+- Only one `--md-option` seemed to take effect when two were given (seen with `flash=` + another).
 
 ## Architecture
 

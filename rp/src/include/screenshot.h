@@ -10,7 +10,9 @@
  * License: GPL v3
  * Description: Receives the Atari ST screen pushed by the resident m68k VBL
  * grabber (userfw.s), deplanes it, applies the palette, pixel-doubles per
- * resolution and writes a 640x400 indexed PNG to the SD card.
+ * resolution and writes a 640x400 indexed PNG to the SD card. On a TT, its
+ * own low/medium/high modes are written as 640x480 / 640x480 / 1280x960 PNGs
+ * row by row as the screen arrives (too big to buffer on the RP).
  */
 
 #ifndef SCREENSHOT_H

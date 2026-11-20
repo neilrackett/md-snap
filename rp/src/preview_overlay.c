@@ -22,8 +22,11 @@
 #include "ff.h"
 #include "memfunc.h"
 
-#define PNG_SRC_WIDTH 640
-#define PNG_SRC_HEIGHT 400
+// MD/Snap writes 640x400 and 640x480 8-bit PNGs, and 1280x960 1-bit ones
+// (TT high), so a row is at most 1280 bytes.
+#define PNG_MAX_ROW_BYTES 1280
+#define PNG_MAX_COLORS 256
+#define PREVIEW_COLORS 16
 
 #define PREVIEW_GROUPS_PER_ROW (PREVIEW_OVERLAY_WIDTH / 16)
 #define PREVIEW_ROW_BYTES (PREVIEW_GROUPS_PER_ROW * 8)
@@ -44,11 +47,23 @@ typedef struct {
   UINT len;
 } idat_reader_t;
 
-static uint8_t srcRow[PNG_SRC_WIDTH];
+static uint8_t srcRow[PNG_MAX_ROW_BYTES];
 static uint8_t scaledRow[PREVIEW_OVERLAY_WIDTH];
 
-static uint32_t overlayBase(void) {
-  return (uint32_t)&__rom_in_ram_start__ + PREVIEW_BLOCK_OFFSET;
+// Source image, from IHDR / PLTE.
+static uint32_t pngWidth;
+static uint32_t pngHeight;
+static uint8_t pngDepth;  // bits per pixel: 1, 2, 4 or 8
+static uint8_t pngPalette[PNG_MAX_COLORS * 3];
+static uint32_t plteCount;
+
+// Source palette index -> preview colour (0-15). A palette of more than 16
+// colours (TT low) is cut to the 16 the thumbnail uses most.
+static uint8_t indexMap[PNG_MAX_COLORS];
+static uint16_t histogram[PNG_MAX_COLORS];
+
+static uintptr_t overlayBase(void) {
+  return (uintptr_t)&__rom_in_ram_start__ + PREVIEW_BLOCK_OFFSET;
 }
 
 static void overlayWriteWord(uint32_t offset, uint16_t value) {
@@ -179,7 +194,53 @@ static void writePlanarRow(uint16_t row, const uint8_t *pixels) {
   }
 }
 
-static bool decodeIdat(FIL *file, uint32_t idatLen) {
+// Palette index of pixel x in srcRow (packed MSB first below 8 bits).
+static uint8_t rowPixel(uint32_t x) {
+  if (pngDepth == 8) {
+    return srcRow[x];
+  }
+  uint32_t bit = x * pngDepth;
+  uint8_t shift = (uint8_t)(8 - pngDepth - (bit & 7));
+  return (uint8_t)((srcRow[bit >> 3] >> shift) & ((1u << pngDepth) - 1));
+}
+
+// Pick the PREVIEW_COLORS most used colours (from histogram), map every source
+// colour to the nearest of them, and write them as the preview palette.
+static void reducePalette(void) {
+  uint8_t chosen[PREVIEW_COLORS * 3];
+  uint32_t n = 0;
+  for (; n < PREVIEW_COLORS; n++) {
+    int best = -1;
+    for (uint32_t i = 0; i < plteCount; i++) {
+      if (histogram[i] && (best < 0 || histogram[i] > histogram[best])) {
+        best = (int)i;
+      }
+    }
+    if (best < 0) {
+      break;
+    }
+    histogram[best] = 0;
+    memcpy(&chosen[n * 3], &pngPalette[best * 3], 3);
+  }
+  for (uint32_t i = 0; i < plteCount; i++) {
+    uint32_t bestDist = UINT32_MAX;
+    for (uint32_t c = 0; c < n; c++) {
+      int dr = pngPalette[i * 3] - chosen[c * 3];
+      int dg = pngPalette[i * 3 + 1] - chosen[c * 3 + 1];
+      int db = pngPalette[i * 3 + 2] - chosen[c * 3 + 2];
+      uint32_t dist = (uint32_t)(dr * dr + dg * dg + db * db);
+      if (dist < bestDist) {
+        bestDist = dist;
+        indexMap[i] = (uint8_t)c;
+      }
+    }
+  }
+  writePalette(chosen, n * 3);
+}
+
+// Decode the IDAT stream into the thumbnail. With countOnly, just tally the
+// colours the thumbnail samples into histogram[] instead.
+static bool decodeIdat(FIL *file, uint32_t idatLen, bool countOnly) {
   idat_reader_t reader = {
       .file = file,
       .remaining = idatLen,
@@ -197,15 +258,16 @@ static bool decodeIdat(FIL *file, uint32_t idatLen) {
   }
   (void)z1;
 
+  uint32_t rowBytes = (pngWidth * pngDepth + 7) / 8;
   uint32_t blockRemaining = 0;
   uint16_t targetRow = 0;
-  uint16_t nextSourceRow = 0;
-  for (uint16_t y = 0; y < PNG_SRC_HEIGHT; y++) {
+  uint32_t nextSourceRow = 0;
+  for (uint32_t y = 0; y < pngHeight; y++) {
     uint8_t filter = 0;
     if (!idatReadRawByte(&reader, &blockRemaining, &filter) || filter != 0) {
       return false;
     }
-    for (uint16_t x = 0; x < PNG_SRC_WIDTH; x++) {
+    for (uint32_t x = 0; x < rowBytes; x++) {
       if (!idatReadRawByte(&reader, &blockRemaining, &srcRow[x])) {
         return false;
       }
@@ -213,13 +275,20 @@ static bool decodeIdat(FIL *file, uint32_t idatLen) {
 
     if (targetRow < PREVIEW_OVERLAY_HEIGHT && y == nextSourceRow) {
       for (uint16_t x = 0; x < PREVIEW_OVERLAY_WIDTH; x++) {
-        uint32_t sx = ((uint32_t)x * PNG_SRC_WIDTH) / PREVIEW_OVERLAY_WIDTH;
-        scaledRow[x] = srcRow[sx];
+        uint32_t sx = ((uint32_t)x * pngWidth) / PREVIEW_OVERLAY_WIDTH;
+        uint8_t idx = rowPixel(sx);
+        if (countOnly) {
+          histogram[idx]++;
+        } else {
+          scaledRow[x] = indexMap[idx];
+        }
       }
-      writePlanarRow(targetRow, scaledRow);
+      if (!countOnly) {
+        writePlanarRow(targetRow, scaledRow);
+      }
       targetRow++;
       nextSourceRow =
-          ((uint32_t)targetRow * PNG_SRC_HEIGHT) / PREVIEW_OVERLAY_HEIGHT;
+          ((uint32_t)targetRow * pngHeight) / PREVIEW_OVERLAY_HEIGHT;
     }
   }
 
@@ -249,9 +318,13 @@ static bool decodePngToOverlay(FIL *file) {
       if (len != sizeof(ihdr) || !readExact(file, ihdr, sizeof(ihdr))) {
         return false;
       }
-      if (be32(ihdr) != PNG_SRC_WIDTH || be32(ihdr + 4) != PNG_SRC_HEIGHT ||
-          ihdr[8] != 8 || ihdr[9] != 3 || ihdr[10] != 0 || ihdr[11] != 0 ||
-          ihdr[12] != 0) {
+      pngWidth = be32(ihdr);
+      pngHeight = be32(ihdr + 4);
+      pngDepth = ihdr[8];
+      if (pngWidth == 0 || pngHeight == 0 ||
+          (pngDepth != 1 && pngDepth != 2 && pngDepth != 4 && pngDepth != 8) ||
+          (pngWidth * pngDepth + 7) / 8 > PNG_MAX_ROW_BYTES || ihdr[9] != 3 ||
+          ihdr[10] != 0 || ihdr[11] != 0 || ihdr[12] != 0) {
         return false;
       }
       if (!skipBytes(file, 4)) {
@@ -259,9 +332,8 @@ static bool decodePngToOverlay(FIL *file) {
       }
       haveIhdr = true;
     } else if (memcmp(type, "PLTE", 4) == 0) {
-      uint8_t plte[16 * 3];
-      uint32_t used = len > sizeof(plte) ? sizeof(plte) : len;
-      if (!readExact(file, plte, used)) {
+      uint32_t used = len > sizeof(pngPalette) ? sizeof(pngPalette) : len;
+      if (!readExact(file, pngPalette, used)) {
         return false;
       }
       if (len > used && !skipBytes(file, len - used)) {
@@ -270,13 +342,28 @@ static bool decodePngToOverlay(FIL *file) {
       if (!skipBytes(file, 4)) {
         return false;
       }
-      writePalette(plte, used);
+      plteCount = used / 3;
       havePlte = true;
     } else if (memcmp(type, "IDAT", 4) == 0) {
       if (!haveIhdr || !havePlte) {
         return false;
       }
-      return decodeIdat(file, len);
+      if (plteCount <= PREVIEW_COLORS) {
+        for (uint32_t i = 0; i < PNG_MAX_COLORS; i++) {
+          indexMap[i] = (uint8_t)i;
+        }
+        writePalette(pngPalette, plteCount * 3);
+        return decodeIdat(file, len, false);
+      }
+      // More than 16 colours: one pass to see which the thumbnail uses, then
+      // back to the start of the IDAT data to draw it.
+      FSIZE_t idatStart = f_tell(file);
+      memset(histogram, 0, sizeof(histogram));
+      if (!decodeIdat(file, len, true) || f_lseek(file, idatStart) != FR_OK) {
+        return false;
+      }
+      reducePalette();
+      return decodeIdat(file, len, false);
     } else if (memcmp(type, "IEND", 4) == 0) {
       return false;
     } else {

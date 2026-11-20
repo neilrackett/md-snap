@@ -10,8 +10,8 @@
  * License: GPL v3
  * Description: Minimal streaming indexed (colour-type 3) PNG encoder.
  *
- * Writes an 8-bit palette PNG one row at a time straight to a FatFs file, so a
- * full 640x400 image never has to be buffered in RAM. The IDAT zlib stream uses
+ * Writes a palette PNG (1, 2, 4 or 8 bits per pixel) one row at a time
+ * straight to a FatFs file, so a full image never has to be buffered in RAM. The IDAT zlib stream uses
  * uncompressed ("stored") DEFLATE blocks: the total compressed length is
  * computable up front from width/height, so the chunk length can be written
  * before the data is streamed. CRC32 (per chunk) and Adler32 (over the raw
@@ -26,7 +26,7 @@
 
 #include "ff.h"
 
-#define PNG_MAX_COLORS 16
+#define PNG_MAX_COLORS 256
 
 typedef struct {
   FIL *f;
@@ -49,15 +49,18 @@ typedef struct {
  * @param height   image height in pixels
  * @param palette  ncolors RGB triplets
  * @param ncolors  number of palette entries (1..PNG_MAX_COLORS)
+ * @param bit_depth bits per pixel: 1, 2, 4 or 8
  * @return true on success
  */
 bool png_writer_begin(png_writer_t *pw, FIL *f, uint16_t width, uint16_t height,
-                      const uint8_t palette[][3], uint16_t ncolors);
+                      const uint8_t palette[][3], uint16_t ncolors,
+                      uint8_t bit_depth);
 
 /**
- * @brief Emit one scanline of palette indices (length = width).
+ * @brief Emit one scanline: (width * bit_depth + 7) / 8 bytes of palette
+ *        indices, packed leftmost pixel first (MSB first below 8 bits).
  */
-bool png_writer_row(png_writer_t *pw, const uint8_t *indices, uint16_t width);
+bool png_writer_row(png_writer_t *pw, const uint8_t *indices, uint16_t len);
 
 /**
  * @brief Finish the IDAT stream and write IEND.

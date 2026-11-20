@@ -37,6 +37,28 @@
 #define OUT_WIDTH 640
 #define OUT_HEIGHT 400
 
+// TT (_MCH high word 2): the grabber sends the whole TT shifter mode word
+// ($FF8262: mode in bits 8-10, ST palette bank in bits 0-3) as the "rez" and
+// all 256 TT palette words. ST low/medium/high on a TT are still 32000 bytes
+// and use the buffer below. TT low/medium/high are 153600 bytes, more than the
+// RP has free, so they are written to the PNG row by row as they arrive; every
+// chunk/frame is a whole number of rows. Must match target/atarist/src/userfw.s.
+#define MCH_TT 2
+#define TT_PALETTE_SIZE 256
+#define TT_MODE_ST_MED 1
+#define TT_MODE_ST_HIGH 2
+#define TT_MODE_TT_MED 4
+#define TT_MODE_TT_HIGH 6
+#define TT_MODE_TT_LOW 7
+#define TT_CHUNK_SIZE 1920  // VBL: 80 chunks
+#define TT_NUM_CHUNKS 80
+#define TT_STREAM_FRAME_SIZE 960  // ETV: 160 frames
+#define TT_STREAM_FRAME_COUNT 160
+#define TT_ROW_WORDS 160       // TT low (8 planes) / TT medium (4 planes) row
+#define TT_HIGH_ROW_WORDS 80   // TT high row (1 plane)
+#define TT_OUT_ROW_BYTES 640   // TT low (doubled) / TT medium, 8-bit
+#define TT_HIGH_OUT_ROW_BYTES 160  // TT high 1280 px, 1-bit
+
 // Payload word layout for the write transport (send_sync_write_command_to_
 // sidecart): [token(2w)][d3(2w)][d4(2w)][d5(2w)][buffer...]. Params and buffer
 // therefore start at fixed word offsets.
@@ -47,14 +69,27 @@
 
 // Received state.
 static uint8_t source[SHOT_SCREEN_SIZE];
-static uint16_t paletteRaw[16];
-static uint32_t shotRez;          // 0 = low, 1 = med, 2 = high
+static uint16_t paletteRaw[TT_PALETTE_SIZE];  // 16 words, or 256 on a TT
+static uint8_t shotPalette[TT_PALETTE_SIZE][3];
+static uint32_t shotRez;          // 0 = low, 1 = med, 2 = high; TT: $FF8262
 static uint32_t shotMch;          // _MCH cookie value (high word = machine)
 static uint16_t chunksMask;       // bit i set once chunk i has arrived
 static uint64_t streamFrameMask;  // bit i set once async stream frame i arrived
 static uint16_t streamSeq;
 static bool beginReceived;
 static volatile bool readyFlag;
+
+// A TT low/medium/high screen going straight into its PNG.
+static bool streaming;        // the PNG is open and rows are being written
+static bool streamDone;       // it has finished; screenshot_writePending reports
+static bool streamOk;         // ...whether it was written
+static FIL streamFile;
+static png_writer_t streamPw;
+static char streamPath[96];
+static uint32_t streamNext;   // next chunk/frame index expected
+static uint32_t streamCount;  // chunks/frames in the whole screen
+static uint32_t streamChunkSize;
+static uint8_t ttRow[TT_OUT_ROW_BYTES];
 
 static char destFolder[64] = "/screenshots";
 static bool nextIndexValid;
@@ -72,6 +107,158 @@ static void write_stream_ack(uint16_t seq, uint16_t nextFrame) {
   *((volatile uint16_t *)(slot + 2)) = (uint16_t)(value & 0xFFFF);
   *((volatile uint16_t *)slot) = (uint16_t)(value >> 16);
   DPRINTF("Screenshot STREAM ACK: seq=%u next=%u\n", seq, nextFrame);
+}
+
+static void build_filename(char *path, size_t size, const char *suffix);
+static const char *rez_name(void);
+static int shot_palette(uint8_t out[][3]);
+
+static bool shot_is_tt(void) { return (shotMch >> 16) == MCH_TT; }
+
+// The screen mode: the ST rez (0-2), or on a TT the mode bits of $FF8262
+// (0-2 the ST modes, 4 TT medium, 6 TT high, 7 TT low).
+static unsigned shot_mode(void) {
+  return shot_is_tt() ? (shotRez >> 8) & 7 : shotRez;
+}
+
+static bool mode_streams(unsigned mode) {
+  return mode == TT_MODE_TT_MED || mode == TT_MODE_TT_HIGH ||
+         mode == TT_MODE_TT_LOW;
+}
+
+// Drop a part-written TT-mode PNG.
+static void stream_abort(void) {
+  f_close(&streamFile);
+  f_unlink(streamPath);
+  streaming = false;
+  beginReceived = false;
+  DPRINTF("Screenshot stream dropped: %s\n", streamPath);
+}
+
+static void stream_finish(void) {
+  bool ok = png_writer_end(&streamPw);
+  ok = (f_close(&streamFile) == FR_OK) && ok;
+  streaming = false;
+  beginReceived = false;
+  if (ok) {
+    DPRINTF("Screenshot written: %s\n", streamPath);
+    nextIndex++;
+  } else {
+    DPRINTF("Screenshot: write error on %s\n", streamPath);
+    f_unlink(streamPath);
+  }
+  streamOk = ok;
+  streamDone = true;
+  readyFlag = true;
+}
+
+// Open the PNG for a TT low/medium/high screen and write its header. TT low
+// (320x480, 256 colours) is doubled across to 640x480; TT medium is 640x480
+// in 16 colours; TT high is 1280x960 mono, kept 1-bit as it comes.
+static void stream_open(uint32_t chunkSize, uint32_t count) {
+  bool high = shot_mode() == TT_MODE_TT_HIGH;
+  int ncolors = shot_palette(shotPalette);
+  build_filename(streamPath, sizeof(streamPath), rez_name());
+  if (f_open(&streamFile, streamPath, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+    DPRINTF("Screenshot: failed to open %s\n", streamPath);
+    beginReceived = false;
+    return;
+  }
+  if (!png_writer_begin(&streamPw, &streamFile, high ? 1280 : 640,
+                        high ? 960 : 480, shotPalette, ncolors,
+                        high ? 1 : 8)) {
+    f_close(&streamFile);
+    f_unlink(streamPath);
+    beginReceived = false;
+    return;
+  }
+  streaming = true;
+  streamNext = 0;
+  streamCount = count;
+  streamChunkSize = chunkSize;
+}
+
+// Metadata for a new screen (BEGIN / STREAM_BEGIN). A TT low/medium/high
+// screen opens its PNG now.
+static void begin_shot(uint32_t rez, uint32_t mch, const uint16_t *pal,
+                       uint32_t chunkSize, uint32_t count) {
+  size_t palBytes = ((mch >> 16) == MCH_TT ? TT_PALETTE_SIZE : 16) * 2;
+  // The m68k resends a BEGIN whose reply was slow (opening the PNG can be);
+  // that repeat must not restart the stream it opened.
+  if (streaming && streamNext == 0 && rez == shotRez && mch == shotMch &&
+      memcmp(pal, paletteRaw, palBytes) == 0) {
+    return;
+  }
+  if (streaming) {
+    stream_abort();  // a new capture replaced one that never finished
+  }
+  shotRez = rez;
+  shotMch = mch;
+  memcpy(paletteRaw, pal, palBytes);
+  chunksMask = 0;
+  streamFrameMask = 0;
+  beginReceived = true;
+  readyFlag = false;
+  if (shot_is_tt() && mode_streams(shot_mode())) {
+    stream_open(chunkSize, count);
+  }
+}
+
+// Decode one TT-mode screen row (big-endian screen words, as they come in the
+// payload) into a PNG row. TT low has 8 interleaved planes and is doubled
+// across, TT medium 4; a TT high row is already a 1-bit PNG row.
+static void build_tt_row(unsigned mode, const uint16_t *w, uint8_t *out) {
+  if (mode == TT_MODE_TT_HIGH) {
+    for (int i = 0; i < TT_HIGH_ROW_WORDS; i++) {
+      out[i * 2] = (uint8_t)(w[i] >> 8);
+      out[i * 2 + 1] = (uint8_t)(w[i] & 0xFF);
+    }
+    return;
+  }
+  int planes = (mode == TT_MODE_TT_LOW) ? 8 : 4;
+  int scale = (mode == TT_MODE_TT_LOW) ? 2 : 1;
+  for (int g = 0; g < TT_ROW_WORDS / planes; g++) {
+    const uint16_t *gw = w + g * planes;
+    for (int bit = 15; bit >= 0; bit--) {
+      uint8_t v = 0;
+      for (int p = 0; p < planes; p++) {
+        v |= (uint8_t)(((gw[p] >> bit) & 1) << p);
+      }
+      int x = (g * 16 + (15 - bit)) * scale;
+      out[x] = v;
+      out[x + scale - 1] = v;
+    }
+  }
+}
+
+// One chunk/frame of a TT-mode screen. They must come in order: a repeat of
+// one already written is skipped, a gap drops the capture. Returns false if
+// the capture was dropped.
+static bool stream_chunk(uint32_t idx, const uint16_t *w) {
+  if (idx < streamNext) {
+    return true;  // a resend of a chunk already written
+  }
+  if (idx != streamNext) {
+    DPRINTF("Screenshot stream: got chunk %lu, expected %lu\n",
+            (unsigned long)idx, (unsigned long)streamNext);
+    stream_abort();
+    return false;
+  }
+  unsigned mode = shot_mode();
+  bool high = mode == TT_MODE_TT_HIGH;
+  uint32_t rowWords = high ? TT_HIGH_ROW_WORDS : TT_ROW_WORDS;
+  uint16_t outBytes = high ? TT_HIGH_OUT_ROW_BYTES : TT_OUT_ROW_BYTES;
+  for (uint32_t off = 0; off < streamChunkSize / 2; off += rowWords) {
+    build_tt_row(mode, w + off, ttRow);
+    if (!png_writer_row(&streamPw, ttRow, outBytes)) {
+      stream_abort();
+      return false;
+    }
+  }
+  if (++streamNext == streamCount) {
+    stream_finish();
+  }
+  return true;
 }
 
 void screenshot_init(const char *folder) {
@@ -94,20 +281,17 @@ void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
 
   switch (protocol->command_id) {
     case APP_SCREENSHOT_BEGIN: {
-      shotRez = p[PW_D3];
-      shotMch = payload32(p, PW_D4);
-      for (int i = 0; i < 16; i++) {
-        paletteRaw[i] = p[PW_BUF + i];
-      }
-      chunksMask = 0;
-      streamFrameMask = 0;
-      beginReceived = true;
-      readyFlag = false;
+      begin_shot(p[PW_D3], payload32(p, PW_D4), p + PW_BUF, TT_CHUNK_SIZE,
+                 TT_NUM_CHUNKS);
       DPRINTF("Screenshot BEGIN: rez=%lu mch=0x%08lX\n",
               (unsigned long)shotRez, (unsigned long)shotMch);
       break;
     }
     case APP_SCREENSHOT_DATA: {
+      if (streaming) {
+        stream_chunk(p[PW_D3], p + PW_BUF);
+        break;
+      }
       if (!beginReceived) {
         break;  // chunk without metadata; ignore
       }
@@ -130,26 +314,27 @@ void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
     }
     case APP_SCREENSHOT_STREAM_BEGIN: {
       streamSeq = (uint16_t)p[PW_D3];
-      shotRez = p[PW_D4];
-      shotMch = payload32(p, PW_D5);
-      for (int i = 0; i < 16; i++) {
-        paletteRaw[i] = p[PW_BUF + i];
+      begin_shot(p[PW_D4], payload32(p, PW_D5), p + PW_BUF,
+                 TT_STREAM_FRAME_SIZE, TT_STREAM_FRAME_COUNT);
+      if (beginReceived) {
+        write_stream_ack(streamSeq, 0);
       }
-      chunksMask = 0;
-      streamFrameMask = 0;
-      beginReceived = true;
-      readyFlag = false;
-      write_stream_ack(streamSeq, 0);
       DPRINTF("Screenshot STREAM BEGIN: seq=%u rez=%lu mch=0x%08lX\n",
               streamSeq, (unsigned long)shotRez, (unsigned long)shotMch);
       break;
     }
     case APP_SCREENSHOT_STREAM_DATA: {
+      uint16_t seq = (uint16_t)p[PW_D3];
+      uint32_t idx = p[PW_D4];
+      if (streaming) {
+        if (seq == streamSeq && stream_chunk(idx, p + PW_BUF)) {
+          write_stream_ack(seq, (uint16_t)streamNext);
+        }
+        break;
+      }
       if (!beginReceived) {
         break;
       }
-      uint16_t seq = (uint16_t)p[PW_D3];
-      uint32_t idx = p[PW_D4];
       if (seq != streamSeq || idx >= SHOT_STREAM_FRAME_COUNT) {
         break;
       }
@@ -201,9 +386,58 @@ static void decode_palette(uint8_t out[][3], int ncolors) {
   }
 }
 
+// A TT palette word is 0RGB with plain 4-bit guns.
+static void tt_color(uint16_t v, uint8_t out[3]) {
+  out[0] = (uint8_t)(((v >> 8) & 0xF) * 17);
+  out[1] = (uint8_t)(((v >> 4) & 0xF) * 17);
+  out[2] = (uint8_t)((v & 0xF) * 17);
+}
+
+// The colours a TT shows in the captured mode, from its 256 palette words.
+// ST low/medium and TT medium use the 16-colour bank in $FF8262 bits 0-3;
+// ST high uses entries 254 and 255, swapped when bit 1 of entry 0 is set;
+// TT high is fixed white/black; TT low uses all 256.
+static int decode_tt_palette(uint8_t out[][3]) {
+  unsigned mode = shot_mode();
+  if (mode == TT_MODE_TT_LOW) {
+    for (int i = 0; i < TT_PALETTE_SIZE; i++) {
+      tt_color(paletteRaw[i], out[i]);
+    }
+    return TT_PALETTE_SIZE;
+  }
+  if (mode == TT_MODE_TT_HIGH) {
+    memset(out[0], 255, 3);
+    memset(out[1], 0, 3);
+    return 2;
+  }
+  if (mode == TT_MODE_ST_HIGH) {
+    int swap = (paletteRaw[0] >> 1) & 1;
+    tt_color(paletteRaw[254], out[swap]);
+    tt_color(paletteRaw[255], out[swap ^ 1]);
+    return 2;
+  }
+  int ncolors = (mode == TT_MODE_ST_MED) ? 4 : 16;
+  const uint16_t *bank = paletteRaw + (shotRez & 0xF) * 16;
+  for (int i = 0; i < ncolors; i++) {
+    tt_color(bank[i], out[i]);
+  }
+  return ncolors;
+}
+
+// Decode the captured palette into out[]; returns the number of colours.
+static int shot_palette(uint8_t out[][3]) {
+  if (shot_is_tt()) {
+    return decode_tt_palette(out);
+  }
+  int ncolors = (shotRez == 0) ? 16 : (shotRez == 1) ? 4 : 2;
+  decode_palette(out, ncolors);
+  return ncolors;
+}
+
 // Build one 640-wide output row of palette indices for the given output line.
 static void build_row(int y, uint8_t *idx) {
-  if (shotRez == 0) {
+  unsigned rez = shot_mode();  // 0-2: the ST modes, on a TT too
+  if (rez == 0) {
     // Low: 320x200, 4 planes, 2x2 doubling.
     const uint8_t *p = source + (y / 2) * 160;
     uint8_t line[320];
@@ -223,7 +457,7 @@ static void build_row(int y, uint8_t *idx) {
       idx[c * 2] = line[c];
       idx[c * 2 + 1] = line[c];
     }
-  } else if (shotRez == 1) {
+  } else if (rez == 1) {
     // Med: 640x200, 2 planes, vertical 1x2 doubling.
     const uint8_t *p = source + (y / 2) * 160;
     for (int g = 0; g < 40; g++) {
@@ -250,11 +484,17 @@ static void build_row(int y, uint8_t *idx) {
 
 // Resolution name used as the filename suffix.
 static const char *rez_name(void) {
-  switch (shotRez) {
+  switch (shot_mode()) {
     case 0:
       return "low";
     case 1:
       return "medium";
+    case TT_MODE_TT_LOW:
+      return "tt_low";
+    case TT_MODE_TT_MED:
+      return "tt_medium";
+    case TT_MODE_TT_HIGH:
+      return "tt_high";
     default:
       return "high";
   }
@@ -298,11 +538,14 @@ static void build_filename(char *path, size_t size, const char *suffix) {
 
 bool screenshot_writePending(void) {
   readyFlag = false;
+  if (streamDone) {
+    // A TT low/medium/high screen: already written as it arrived.
+    streamDone = false;
+    return streamOk;
+  }
   beginReceived = false;
 
-  int ncolors = (shotRez == 0) ? 16 : (shotRez == 1) ? 4 : 2;
-  uint8_t palette[16][3];
-  decode_palette(palette, ncolors);
+  int ncolors = shot_palette(shotPalette);
 
   char path[96];
   build_filename(path, sizeof(path), rez_name());
@@ -314,7 +557,8 @@ bool screenshot_writePending(void) {
   }
 
   png_writer_t pw;
-  bool ok = png_writer_begin(&pw, &file, OUT_WIDTH, OUT_HEIGHT, palette, ncolors);
+  bool ok = png_writer_begin(&pw, &file, OUT_WIDTH, OUT_HEIGHT, shotPalette,
+                             ncolors, 8);
   uint8_t row[OUT_WIDTH];
   for (int y = 0; y < OUT_HEIGHT && ok; y++) {
     build_row(y, row);
@@ -355,7 +599,7 @@ bool screenshot_captureLocal(void) {
   }
 
   png_writer_t pw;
-  bool ok = png_writer_begin(&pw, &file, OUT_WIDTH, OUT_HEIGHT, palette, 2);
+  bool ok = png_writer_begin(&pw, &file, OUT_WIDTH, OUT_HEIGHT, palette, 2, 8);
   uint8_t row[OUT_WIDTH];
   for (int y = 0; y < OUT_HEIGHT && ok; y++) {
     const uint8_t *p = fb + (y / 2) * 40;  // 320x200 -> 2x vertical double

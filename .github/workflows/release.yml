@@ -13,11 +13,14 @@ on:
   push:
     branches:
       - main
-    # Documentation is not part of the firmware, so a change to nothing
-    # else does not need building. Keep this list the same in pr.yml and
-    # release.yml.
+    # Documentation and the EmuMD host build (emu/, including the
+    # submodule, and mdfw.ini) are not part of the firmware, so a change
+    # to nothing else does not need building. Keep this list the same in
+    # pr.yml and release.yml.
     paths-ignore:
       - '**.md'
+      - 'emu/**'
+      - 'mdfw.ini'
   workflow_dispatch:
 
 permissions:

@@ -211,12 +211,18 @@ static inline void __not_in_flash_func(tprotocol_parse)(
       break;
     case PAYLOAD_READ_INPROGRESS:
       // Store the 16-bit chunk into the payload array
+#if defined(__arm__) && !defined(__aarch64__)
       asm("strh %0, [%1]"
           :
           : "r"(data),
             "r"(&tprotocol_transmission
                      .payload[(tprotocol_transmission.bytes_read / 2)])
           : "memory");
+#else
+      // A 64-bit host (EmuMD): __ARM_ARCH is defined on arm64 too.
+      tprotocol_transmission.payload[tprotocol_transmission.bytes_read / 2] =
+          data;
+#endif
       tprotocol_transmission.bytes_read += 2;
       if (tprotocol_transmission.bytes_read >=
           tprotocol_transmission.payload_size) {
