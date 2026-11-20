@@ -8,9 +8,10 @@
 ## Build MD/Snap for this computer and run it in Hatari with EmuMD (see
 ## README.md). MACHINE= st, ste, megaste, tt... (default: mdfw.ini's);
 ## TOS= a TOS image (default: EmuMD's EmuTOS; a TT needs a 512 KB one);
-## RECORD=FILE.avi records picture and sound until you quit; EMUMD= another
-## EmuMD checkout.
+## SELECT=MS[+HOLD],... presses SELECT that many ms of emulated time after
+## Hatari starts, for HOLD ms (a tap without one); RECORD=FILE.avi records
+## picture and sound until you quit; EMUMD= another EmuMD checkout.
 EMUMD ?= emu/emumd
 .PHONY: emu
 emu:
-	$(EMUMD)/tools/mdfw run $(if $(MACHINE),--machine "$(MACHINE)") $(if $(TOS),--tos "$(TOS)") $(if $(RECORD),--record "$(RECORD)")
+	$(EMUMD)/tools/mdfw run $(if $(MACHINE),--machine "$(MACHINE)") $(if $(TOS),--tos "$(TOS)") $(if $(SELECT),-O "select=$(SELECT)") $(if $(RECORD),--record "$(RECORD)")

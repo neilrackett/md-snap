@@ -43,7 +43,7 @@ PICO_TOOLCHAIN_PATH=/Applications/ArmGNUToolchain/14.2.rel1/arm-none-eabi/bin \
 
 ## 3a. Running it on your computer (EmuMD)
 `emu/emumd` (a submodule) builds the firmware for the host and runs it in Hatari (`mdfw.ini`, `template = sidecartridge`: the firmware's own `main()` runs, with EmuMD standing in for romemul, commemul, SELECT, the SD card driver and the Booster). `git submodule update --init emu/emumd`, then `emu/emumd/tools/mdfw hatari` once, then `make emu` (`emu/emu.mk`; `MACHINE=tt TOS=...` for a TT; in automation, `emu/emumd/tools/mdfw run --headless --frames N --screenshot out.png`). The SD card is `build/sd`.
-- EmuMD never presses SELECT, so a capture can't be triggered there yet; the menu, the TT/ST boot and the grabber's install can be checked.
+- SELECT is pressed on a schedule: `make emu SELECT=20000` (or `-O select=MS[+HOLD],...`) taps it 20 s of emulated time after Hatari starts; `+HOLD` holds it (`5000+11000` is a long press, `0+3000` the escape to the Booster at power-on). PNGs land in `build/sd/screenshots`.
 - `emu/standins.c` holds what EmuMD doesn't stand in for yet (`commemul_deinit`, `romemul_deinit`); delete each one when EmuMD provides it (the link fails with a duplicate symbol).
 - Code that keeps a ROM-in-RAM or flash address must use `uintptr_t`, not `uint32_t`: the same on the RP2040, whole on a 64-bit host.
 - A TT needs a 512 KB TOS (EmuTOS's `etos512uk.img`, or TOS 3.06). Don't use Hatari's `--tos-res`: it turns on Hatari's own cartridge, so MD/Snap's never boots. Boot from a floppy with a `NEWDESK.INF` instead (`#E 18 0R 00 06`, R = 1-3 ST low/med/high, 4 TT medium, 6 TT low; TT high is `--monitor mono`).

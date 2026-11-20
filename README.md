@@ -44,10 +44,11 @@ git submodule update --init emu/emumd
 emu/emumd/tools/mdfw hatari   # once: the Hatari that runs it, and EmuTOS
 make emu                      # build build/md-snap.mdfw and run it on an STE
 make emu MACHINE=tt TOS=~/.cache/emumd/emutos-512k-1.4/etos512uk.img   # on a TT
+make emu SELECT=20000,30000   # press SELECT 20 and 30 seconds in, for two screenshots
 make emu RECORD=mdsnap.avi    # recording picture and sound until you quit
 ```
 
-EmuMD doesn't have a SELECT button yet, so for now you can try the menu and boot to the desktop, but not take a screenshot. It needs libslirp for the template's network code (`brew install libslirp pkg-config`, or `sudo apt install libslirp-dev libglib2.0-dev pkg-config`). See [EmuMD's guide](https://github.com/neilrackett/emumd/blob/main/docs/GUIDE.md) for more.
+Screenshots land in `build/sd/screenshots`. `SELECT=5000+11000` holds SELECT for 11 seconds from 5 seconds in, which is a long press. It needs libslirp for the template's network code (`brew install libslirp pkg-config`, or `sudo apt install libslirp-dev libglib2.0-dev pkg-config`). See [EmuMD's guide](https://github.com/neilrackett/emumd/blob/main/docs/GUIDE.md) for more.
 
 ## What's next?
 

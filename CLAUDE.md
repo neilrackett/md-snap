@@ -166,10 +166,10 @@ There is no test suite. "Verification" is: build succeeds, UF2 boots on hardware
 
 ### EmuMD (Hatari on this computer)
 `emu/emumd` is a submodule; `mdfw.ini` builds `build/md-snap.mdfw` with `template = sidecartridge`; `make emu` runs it (`emu/emu.mk`). How-to and gotchas are in AGENTS.md §3a. The ones that cost time:
-- EmuMD never presses SELECT (`select_detectPush()` is always false), so captures can't be triggered there yet.
+- SELECT is pressed on a schedule: `make emu SELECT=20000` / `-O select=MS[+HOLD],...` (emulated ms since Hatari started).
 - Hatari's `--tos-res` turns on Hatari's **own** cartridge, so MD/Snap's never boots (no menu, no grabber). Set a TT's resolution with a floppy `NEWDESK.INF` instead; TT high is `--monitor mono`.
 - EmuMD's RP is infinitely fast, so the VBL transport never waits and ETV's credit loop runs at ~3 frames/s; neither says anything about real timing.
-- Only one `--md-option` seemed to take effect when two were given (seen with `flash=` + another).
+- `-O flash=FILE` keeps the app's settings between runs (e.g. the ETV hook), alongside `select=`.
 
 ## Architecture
 
