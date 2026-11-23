@@ -55,6 +55,12 @@ reverse-video added to `term.c`/`display_term.c` and the SELECT escape hatch in 
   palette and the rest map to the nearest, pass 2 draws. 256-colour ones stay pixel-for-pixel.
   The menu code relocates to 4 KB *below* the screen, so the 153600-byte TT screen doesn't reach it.
   Offsets past +32767 need `adda.l`, not a `lea` displacement (68000).
+  `TTMENU_REZ` also switches the **TT's internal speaker off** for the menu (YM port A bit 6 set, via
+  XBIOS Giaccess/Ongibit), always, with no setting, as md-sidepad and the Booster do. Only on a TT: other
+  machines use that bit for something else. It records the mode it switched from and whether it switched
+  the speaker off in `tt_state` (`main.s`'s RAM copy, passed in a1, because ttmenu.s runs from ROM), and
+  `TTMENU_EXIT` puts both back in `boot_gem` and before `.reset`. Without that, a TT with no
+  DESKTOP.INF/NEWDESK.INF came up on the desktop in TT low; with one, TOS sets the mode from it anyway.
 - **TT support (`_MCH` $0002xxxx):** the grabber sends the whole `$FF8262` shifter word as "rez" (mode
   bits 8-10, ST palette bank bits 0-3) plus all 256 TT palette words (`$FF8400`, plain `0RGB` 4-bit —
   NOT the STE bit order), and reads the `$FF820D` base low byte. ST modes on a TT stay 32000 bytes and

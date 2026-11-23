@@ -14,7 +14,7 @@ When the app starts you'll see a list of the screenshots you've already taken. P
 
 It works in all ST resolutions (low, medium and high) and corrects the aspect ratio for you, so the saved 640×400 image looks like what you see on screen rather than squashed pixels.
 
-On a TT the menu is shown in TT low, so a screenshot's preview has all of its colours (up to 256), and on a TT's mono monitor in TT high. It also captures TT low, medium and high: TT low (320×480, 256 colours) is saved as 640×480, TT medium as 640×480 and TT high as a 1280×960 mono PNG. A TT screen is nearly five times the size of an ST one, so it takes a little longer to save.
+On a TT the menu is shown in TT low, so a screenshot's preview has all of its colours (up to 256), and on a TT's mono monitor in TT high. The TT's internal speaker is switched off while the menu is shown, and when you go to the desktop the speaker and the screen mode are put back as they were. It also captures TT low, medium and high: TT low (320×480, 256 colours) is saved as 640×480, TT medium as 640×480 and TT high as a 1280×960 mono PNG. A TT screen is nearly five times the size of an ST one, so it takes a little longer to save.
 
 ## Installation
 

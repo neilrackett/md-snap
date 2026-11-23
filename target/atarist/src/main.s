@@ -65,6 +65,7 @@ PALETTE_ADDR		equ $FFFF8240
 USERFW			equ (ROM4_ADDR + $800)				; $FA0800
 TTMENU_REZ		equ (ROM4_ADDR + $1800)				; ttmenu.s: choose a TT's menu mode
 TTMENU_DRAW		equ (ROM4_ADDR + $1804)				; ttmenu.s: draw it
+TTMENU_EXIT		equ (ROM4_ADDR + $1808)				; ttmenu.s: a TT's mode and speaker back
 
 SCREEN_SIZE			equ (-4096)	; Use the memory before the screen memory to store the copied code
 COLS_HIGH			equ 20		; 16 bit columns in the ST
@@ -331,6 +332,7 @@ start_rom_code:
 ; its preview are drawn for the resolution actually on screen. A TT is
 ; switched to TT low instead, for a 256-colour preview, unless it is in
 ; ST high or TT high (ttmenu.s).
+	lea tt_state(pc), a1		; what a TT's menu changes, for TTMENU_EXIT
 	jsr TTMENU_REZ				; a TT: d0 = 2, 6 or 7; anything else: -1
 	tst.w d0
 	bpl.s .rez_ok
@@ -451,6 +453,8 @@ start_rom_code:
 	bra .print_loop_tt
 
 .reset:
+	lea tt_state(pc), a1		; a TT's mode and speaker back as they were
+	jsr TTMENU_EXIT
     move.l #PRE_RESET_WAIT, d6
 .wait_me:
     subq.l #1, d6           ; Decrement the outer loop
@@ -517,6 +521,8 @@ boot_gem:
 	; after a reset), so this installs once per boot. bsr/rts is stack-balanced,
 	; so the final rts below still unwinds the print loop back to TOS.
 	bsr rom_function
+	lea tt_state(pc), a1		; a TT's mode and speaker back as they were,
+	jsr TTMENU_EXIT				; before the banner prints in it
 	; Print the exit banner via the VT52 console, then return to TOS to continue
 	; booting to the GEM desktop. boot_gem is reached via a beq from
 	; check_commands inside the print loop, at the same stack level as the
@@ -553,6 +559,9 @@ rom_function:
 
 userfw_installed:
     dc.l    0
+tt_state:						; filled in by TTMENU_REZ (ttmenu.s)
+	dc.w    -1					; the mode to put back, -1 for none
+	dc.b    0					; $FF: a TT's speaker was switched off
 menu_draw_seq:
 	dc.b    $ff
 	even

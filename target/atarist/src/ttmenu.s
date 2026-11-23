@@ -11,6 +11,19 @@
 ; (mono) monitor the menu is drawn four times over, 1280x800 centred in
 ; 1280x960, and there is no preview.
 ;
+; The mode the TT was in is put back on the way to the desktop or a reset,
+; so the desktop comes up in it even with no DESKTOP.INF/NEWDESK.INF to set
+; one. TTMENU_REZ and TTMENU_EXIT share a block in main.s's RAM copy (this
+; code runs from ROM), passed in a1: the mode to put back (a word, -1 when
+; the menu kept the mode), then the speaker flag (a byte).
+;
+; A TT's internal speaker is switched off while the menu is shown, and put
+; back as TOS had it on the way to the desktop or a reset, as the Booster's
+; own screen and the other md-* firmwares do. Setting bit 6 of the YM's I/O
+; port A switches it off; TOS leaves the bit clear, with the speaker on.
+; Other machines use that bit for something else, so it is only touched on
+; a TT.
+;
 ; Runs from ROM: it writes only to the screen and the hardware. Position
 ; independent, reached by an absolute jsr through the jump table below.
 
@@ -35,6 +48,15 @@ XBIOS_GETREZ		equ 4
 REZ_ST_HIGH			equ 2
 REZ_TT_HIGH			equ 6
 REZ_TT_LOW			equ 7
+XBIOS_GIACCESS		equ 28
+XBIOS_OFFGIBIT		equ 29
+XBIOS_ONGIBIT		equ 30
+YM_PORT_A			equ 14			; YM register: I/O port A
+YM_TT_SPEAKER_OFF	equ $40			; port A bit 6: set, the speaker is off
+
+; The block at a1 (main.s tt_state).
+TT_SAVED_REZ		equ 0			; word: the mode to put back, -1 for none
+TT_SPEAKER_WAS_ON	equ 2			; byte: $FF when the speaker was switched off
 
 ; Layout. The menu is 200 lines of 40 bytes; a TT low line is 320 bytes and a
 ; TT high one 160, and either way the 40 or 80 lines above and below the menu
@@ -52,10 +74,13 @@ PREVIEW_OFFSET		equ (BORDER_SIZE + (64 * TT_LOW_ROW) + (11 * 16))	; menu x=176, 
 ttmenu:
 	bra.w	ttmenu_rez				; TTMENU_REZ
 	bra.w	ttmenu_draw				; TTMENU_DRAW
+	bra.w	ttmenu_exit				; TTMENU_EXIT
 
 ; --- Choose the menu's mode ---------------------------------------------
 ; On a TT: d0 = 2 (ST high) or 6 (TT high), left as they are, or 7 (TT low),
 ; switched to from any other mode with Setscreen. Anything else: d0 = -1.
+; a1 = the block in RAM: the mode switched from, and whether the speaker
+; was switched off, for TTMENU_EXIT to put back.
 ; Supervisor (reads the cookie jar); uses d0-d2/a0-a2 like XBIOS.
 ttmenu_rez:
 	move.l	_p_cookies.w, d0
@@ -71,26 +96,77 @@ ttmenu_rez:
 .found_vdo:
 	cmp.w	#2, (a0)				; $0002xxxx: a TT's video
 	bne.s	.not_tt
+	move.l	a1, -(sp)				; the block, kept across XBIOS
+	bsr.s	speaker_off
 	move.w	#XBIOS_GETREZ, -(sp)
 	trap	#14
 	addq.l	#2, sp
+	movea.l	(sp)+, a1
 	cmp.w	#REZ_ST_HIGH, d0
 	beq.s	.rez_done
 	cmp.w	#REZ_TT_HIGH, d0
 	beq.s	.rez_done
 	cmp.w	#REZ_TT_LOW, d0
 	beq.s	.rez_done
-	move.w	#REZ_TT_LOW, -(sp)		; Setscreen(-1, -1, TT low)
-	move.l	#-1, -(sp)
-	move.l	#-1, -(sp)
-	move.w	#XBIOS_SETSCREEN, -(sp)
-	trap	#14
-	lea		12(sp), sp
+	move.w	d0, TT_SAVED_REZ(a1)	; to put back on the way out
+	moveq	#REZ_TT_LOW, d0
+	bsr.s	set_rez
 	moveq	#REZ_TT_LOW, d0
 .rez_done:
 	rts
 .not_tt:
 	moveq	#-1, d0
+	rts
+
+; Setscreen(-1, -1, d0): the mode d0, the screen where it is.
+set_rez:
+	move.w	d0, -(sp)
+	move.l	#-1, -(sp)
+	move.l	#-1, -(sp)
+	move.w	#XBIOS_SETSCREEN, -(sp)
+	trap	#14
+	lea		12(sp), sp
+	rts
+
+; A TT's speaker off, unless TOS already had it off. a1 = the block.
+speaker_off:
+	move.l	a1, -(sp)
+	move.w	#YM_PORT_A, -(sp)		; register, bit 7 clear: read
+	clr.w	-(sp)					; data, unused for a read
+	move.w	#XBIOS_GIACCESS, -(sp)
+	trap	#14
+	addq.l	#6, sp
+	movea.l	(sp)+, a1
+	btst	#6, d0
+	bne.s	.off_done				; TOS had it off: nothing to do or undo
+	st		TT_SPEAKER_WAS_ON(a1)
+	move.w	#YM_TT_SPEAKER_OFF, -(sp)
+	move.w	#XBIOS_ONGIBIT, -(sp)	; OR port A, interrupts masked
+	trap	#14
+	addq.l	#4, sp
+.off_done:
+	rts
+
+; --- Put the mode and the speaker back ---------------------------------
+; a1 = the block ttmenu_rez filled in: switch back to the mode it switched
+; from, and the speaker back on if it switched it off, each once. Uses
+; d0-d2/a0-a2 like XBIOS.
+ttmenu_exit:
+	move.l	a1, -(sp)				; the block, kept across XBIOS
+	tst.b	TT_SPEAKER_WAS_ON(a1)
+	beq.s	.spk_done
+	sf		TT_SPEAKER_WAS_ON(a1)
+	move.w	#(~YM_TT_SPEAKER_OFF & $FF), -(sp)
+	move.w	#XBIOS_OFFGIBIT, -(sp)	; AND port A, interrupts masked
+	trap	#14
+	addq.l	#4, sp
+.spk_done:
+	movea.l	(sp)+, a1
+	move.w	TT_SAVED_REZ(a1), d0
+	bmi.s	.rez_done
+	move.w	#-1, TT_SAVED_REZ(a1)
+	bra.s	set_rez
+.rez_done:
 	rts
 
 ; --- Draw the menu ------------------------------------------------------
