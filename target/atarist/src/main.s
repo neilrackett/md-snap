@@ -563,6 +563,7 @@ userfw_installed:
 tt_state:						; filled in by TTMENU_REZ (ttmenu.s)
 	dc.w    -1					; the mode to put back, -1 for none
 	dc.b    0					; $FF: a TT's speaker was switched off
+	dc.b    0					; $FF: a TT's palette was kept
 menu_draw_seq:
 	dc.b    $ff
 	even

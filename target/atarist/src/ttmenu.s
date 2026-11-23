@@ -11,6 +11,11 @@
 ; (mono) monitor the menu is drawn four times over, 1280x800 centred in
 ; 1280x960, and there is no preview.
 ;
+; The TT's 256-colour palette is kept while the menu shows (it loads each
+; preview's) and put back on the way out too, or the desktop's text comes up
+; in a preview's colours. It is kept in the 512 bytes below the screen: above
+; main.s's code, which is copied 4 KB below the screen and is under 2 KB.
+;
 ; The mode the TT was in is put back on the way to the desktop or a reset,
 ; so the desktop comes up in it even with no DESKTOP.INF/NEWDESK.INF to set
 ; one. TTMENU_REZ and TTMENU_EXIT share a block in main.s's RAM copy (this
@@ -45,6 +50,8 @@ TT_SHIFTER_MODE		equ $FFFF8262	; mode in bits 8-10
 TT_PALETTE			equ $FFFF8400	; 256 colour words, 0RGB
 XBIOS_SETSCREEN		equ 5
 XBIOS_GETREZ		equ 4
+XBIOS_PHYSBASE		equ 2
+TT_PAL_BYTES		equ 512
 REZ_ST_HIGH			equ 2
 REZ_TT_HIGH			equ 6
 REZ_TT_LOW			equ 7
@@ -57,6 +64,7 @@ YM_TT_SPEAKER_OFF	equ $40			; port A bit 6: set, the speaker is off
 ; The block at a1 (main.s tt_state).
 TT_SAVED_REZ		equ 0			; word: the mode to put back, -1 for none
 TT_SPEAKER_WAS_ON	equ 2			; byte: $FF when the speaker was switched off
+TT_PALETTE_KEPT		equ 3			; byte: $FF when the palette was kept
 
 ; Layout. The menu is 200 lines of 40 bytes; a TT low line is 320 bytes and a
 ; TT high one 160, and either way the 40 or 80 lines above and below the menu
@@ -98,6 +106,13 @@ ttmenu_rez:
 	bne.s	.not_tt
 	move.l	a1, -(sp)				; the block, kept across XBIOS
 	bsr.s	speaker_off
+	bsr		palette_place			; keep the palette
+	movea.l	#TT_PALETTE, a2
+	move.w	#255, d1
+.keep_palette:
+	move.w	(a2)+, (a0)+
+	dbf		d1, .keep_palette
+	st		TT_PALETTE_KEPT(a1)
 	move.w	#XBIOS_GETREZ, -(sp)
 	trap	#14
 	addq.l	#2, sp
@@ -128,7 +143,7 @@ set_rez:
 	lea		12(sp), sp
 	rts
 
-; A TT's speaker off, unless TOS already had it off. a1 = the block.
+; A TT's speaker off, unless TOS already had it off. a1 = the block, kept.
 speaker_off:
 	move.l	a1, -(sp)
 	move.w	#YM_PORT_A, -(sp)		; register, bit 7 clear: read
@@ -136,7 +151,7 @@ speaker_off:
 	move.w	#XBIOS_GIACCESS, -(sp)
 	trap	#14
 	addq.l	#6, sp
-	movea.l	(sp)+, a1
+	movea.l	(sp), a1
 	btst	#6, d0
 	bne.s	.off_done				; TOS had it off: nothing to do or undo
 	st		TT_SPEAKER_WAS_ON(a1)
@@ -145,12 +160,25 @@ speaker_off:
 	trap	#14
 	addq.l	#4, sp
 .off_done:
+	movea.l	(sp)+, a1				; kept, as XBIOS doesn't
 	rts
 
-; --- Put the mode and the speaker back ---------------------------------
+; a0 = where the palette is kept: the 512 bytes below the screen. Uses
+; d0-d2/a0-a2 like XBIOS, but keeps a1.
+palette_place:
+	move.l	a1, -(sp)
+	move.w	#XBIOS_PHYSBASE, -(sp)
+	trap	#14
+	addq.l	#2, sp
+	movea.l	(sp)+, a1
+	movea.l	d0, a0
+	lea		-TT_PAL_BYTES(a0), a0
+	rts
+
+; --- Put the mode, the speaker and the palette back ----------------------
 ; a1 = the block ttmenu_rez filled in: switch back to the mode it switched
-; from, and the speaker back on if it switched it off, each once. Uses
-; d0-d2/a0-a2 like XBIOS.
+; from, the speaker back on if it switched it off, and the palette back as
+; it was, each once. Uses d0-d2/a0-a2 like XBIOS.
 ttmenu_exit:
 	move.l	a1, -(sp)				; the block, kept across XBIOS
 	tst.b	TT_SPEAKER_WAS_ON(a1)
@@ -160,13 +188,25 @@ ttmenu_exit:
 	move.w	#XBIOS_OFFGIBIT, -(sp)	; AND port A, interrupts masked
 	trap	#14
 	addq.l	#4, sp
+	movea.l	(sp), a1
 .spk_done:
-	movea.l	(sp)+, a1
 	move.w	TT_SAVED_REZ(a1), d0
 	bmi.s	.rez_done
 	move.w	#-1, TT_SAVED_REZ(a1)
-	bra.s	set_rez
+	bsr		set_rez
+	movea.l	(sp), a1
 .rez_done:
+	movea.l	(sp)+, a1
+	tst.b	TT_PALETTE_KEPT(a1)		; after the mode: it must not undo this
+	beq.s	.pal_done
+	sf		TT_PALETTE_KEPT(a1)
+	bsr.s	palette_place
+	movea.l	#TT_PALETTE, a2
+	move.w	#255, d1
+.put_palette:
+	move.w	(a0)+, (a2)+
+	dbf		d1, .put_palette
+.pal_done:
 	rts
 
 ; --- Draw the menu ------------------------------------------------------

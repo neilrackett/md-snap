@@ -74,6 +74,10 @@ reverse-video added to `term.c`/`display_term.c` and the SELECT escape hatch in 
   the speaker off in `tt_state` (`main.s`'s RAM copy, passed in a1, because ttmenu.s runs from ROM), and
   `TTMENU_EXIT` puts both back in `boot_gem` and before `.reset`. Without that, a TT with no
   DESKTOP.INF/NEWDESK.INF came up on the desktop in TT low; with one, TOS sets the mode from it anyway.
+  It also keeps all 256 TT palette words (in the 512 bytes below the screen, above main.s's relocated
+  code) and puts them back after the mode: otherwise the desktop's text came up in a preview's colours
+  (grey). **XBIOS trashes d0-d2/a0-a2**, so anything that keeps a1 across a trap must reload it: a
+  `speaker_off` that didn't sent the "palette kept" flag to a stray low address.
 - **TT support (`_MCH` $0002xxxx):** the grabber sends the whole `$FF8262` shifter word as "rez" (mode
   bits 8-10, ST palette bank bits 0-3) plus all 256 TT palette words (`$FF8400`, plain `0RGB` 4-bit —
   NOT the STE bit order), and reads the `$FF820D` base low byte. ST modes on a TT stay 32000 bytes and
@@ -82,7 +86,10 @@ reverse-video added to `term.c`/`display_term.c` and the SELECT escape hatch in 
   (VBL) / 160×960 B (ETV) whole-row chunks and the RP **writes PNG rows from inside the command
   callback**, before the reply token/credit goes out; that is the backpressure. `chandler` has a single
   pending slot, so chunks must arrive in order: repeats are skipped, a gap drops the capture. TT high is
-  written as a 1-bit PNG. The installer `Mxalloc`s the 154 KB snapshot buffer preferring TT-RAM.
+  written as a 1-bit PNG. The installer `Mxalloc`s the block and 154 KB buffer from **ST-RAM
+  only**: TOS 3 tests TT-RAM *after* the cartridge installs (the memory test shows below MD/Snap's
+  banner), writing patterns over a handler living there, and the next VBL ran them (11 bombs, line-F).
+  Hatari reproduces it only with `--ttram N --addr24 off --fast-boot off` (fast boot skips the test).
 - **The RP heap must stop at 0x20030000.** `__StackLimit` in `rp/src/memmap_rp.ld` is the heap's ceiling
   (`_sbrk`); it used to be the end of `ROM_IN_RAM`, so a heap that grew past RAM wrote into the cartridge
   window: the ST's code, the command sentinel at `$FA2000`, the menu. It showed as **4 bombs** when the

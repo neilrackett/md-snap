@@ -57,7 +57,7 @@
 
 GEMDOS_Malloc		equ 72			; trap #1 -> allocate, ptr in d0
 GEMDOS_Mxalloc		equ 68			; trap #1 -> allocate by RAM type (TOS 3+)
-MXALLOC_PREFER_TT	equ 3			; TT-RAM if there is any, else ST-RAM
+MXALLOC_ST_ONLY		equ 0			; ST-RAM only
 VBL_VECTOR			equ $70			; .l level-4 (VBL) autovector
 ETV_TIMER_VECTOR	equ $400		; .l etv_timer subroutine called by TOS
 _p_cookies			equ $5a0		; .l pointer to the system cookie jar (0 = none)
@@ -139,7 +139,10 @@ userfw:
 
 	; Allocate the resident block + the trailing screen snapshot buffer + the
 	; palette buffer. A TT needs room for its 153600-byte screens and 256-colour
-	; palette, and gets it from TT-RAM when it has some (Mxalloc, TOS 3+).
+	; palette. It is taken from ST-RAM only (Mxalloc, TOS 3+), never TT-RAM:
+	; TOS 3 tests TT-RAM after the cartridge has installed this, writing its
+	; test patterns over the resident handler, which the next VBL then runs
+	; (11 bombs: the patterns run as line-F instructions).
 	bsr		read_mch				; d0 = _MCH (runs from ROM: reads only)
 	swap	d0
 	cmp.w	#MCH_TT, d0
@@ -151,7 +154,7 @@ userfw:
 	move.l	#SHOT_SCREEN_SIZE, d3
 	bra.s	.uf_alloc_done
 .uf_alloc_tt:
-	move.w	#MXALLOC_PREFER_TT, -(sp)
+	move.w	#MXALLOC_ST_ONLY, -(sp)
 	move.l	#((resident_end-resident_start)+TT_SCREEN_SIZE+TT_PAL_BYTES), -(sp)
 	move.w	#GEMDOS_Mxalloc, -(sp)
 	trap	#1
