@@ -15,6 +15,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "chandler.h"
 #include "constants.h"
@@ -81,12 +82,14 @@ static uint64_t streamFrameMask;  // bit i set once async stream frame i arrived
 static uint16_t streamSeq;
 static bool beginReceived;
 static volatile bool readyFlag;
-static volatile bool unsupportedFlag;  // the pending "screen" can't be captured
+// What became of a screen already dealt with (streamed to its PNG, or one
+// that can't be captured), for screenshot_writePending; RESULT_NONE when the
+// pending screen is in source[] still to be written.
+#define RESULT_NONE (-1)
+static volatile int pendingResult = RESULT_NONE;
 
 // A TT low/medium/high screen going straight into its PNG.
 static bool streaming;        // the PNG is open and rows are being written
-static bool streamDone;       // it has finished; screenshot_writePending reports
-static bool streamOk;         // ...whether it was written
 static FIL streamFile;
 static png_writer_t streamPw;
 static char streamPath[96];
@@ -99,6 +102,21 @@ static char destFolder[64] = "/screenshots";
 static char lastPath[96];  // the PNG written last
 static bool nextIndexValid;
 static unsigned nextIndex = 1;
+
+// Payload words are big-endian screen words: unpack them to bytes.
+static void unpack_be(uint8_t *dst, const uint16_t *w, int nwords) {
+  for (int i = 0; i < nwords; i++) {
+    dst[i * 2] = (uint8_t)(w[i] >> 8);
+    dst[i * 2 + 1] = (uint8_t)(w[i] & 0xFF);
+  }
+}
+
+// A screenshot written: the next one gets the next number.
+static void shot_saved(const char *path) {
+  DPRINTF("Screenshot written: %s\n", path);
+  strcpy(lastPath, path);
+  nextIndex++;
+}
 
 static inline uint32_t payload32(const uint16_t *p, int wordOffset) {
   return ((uint32_t)p[wordOffset + 1] << 16) | p[wordOffset];
@@ -146,15 +164,12 @@ static void stream_finish(void) {
   streaming = false;
   beginReceived = false;
   if (ok) {
-    DPRINTF("Screenshot written: %s\n", streamPath);
-    strcpy(lastPath, streamPath);
-    nextIndex++;
+    shot_saved(streamPath);
   } else {
     DPRINTF("Screenshot: write error on %s\n", streamPath);
     f_unlink(streamPath);
   }
-  streamOk = ok;
-  streamDone = true;
+  pendingResult = ok ? SCREENSHOT_SAVED : SCREENSHOT_FAILED;
   readyFlag = true;
 }
 
@@ -173,9 +188,7 @@ static void stream_open(uint32_t chunkSize, uint32_t count) {
   if (!png_writer_begin(&streamPw, &streamFile, high ? 1280 : 640,
                         high ? 960 : 480, shotPalette, ncolors,
                         high ? 1 : 8)) {
-    f_close(&streamFile);
-    f_unlink(streamPath);
-    beginReceived = false;
+    stream_abort();
     return;
   }
   streaming = true;
@@ -195,7 +208,7 @@ static void begin_shot(uint32_t rez, uint32_t mch, const uint16_t *pal,
     shotRez = rez;
     shotMch = mch;
     beginReceived = false;
-    unsupportedFlag = true;
+    pendingResult = SCREENSHOT_UNSUPPORTED;
     readyFlag = true;
     return;
   }
@@ -216,7 +229,7 @@ static void begin_shot(uint32_t rez, uint32_t mch, const uint16_t *pal,
   streamFrameMask = 0;
   beginReceived = true;
   readyFlag = false;
-  if (shot_is_tt() && mode_streams(shot_mode())) {
+  if (mode_streams(shot_mode())) {  // only a TT has these modes
     stream_open(chunkSize, count);
   }
 }
@@ -226,10 +239,7 @@ static void begin_shot(uint32_t rez, uint32_t mch, const uint16_t *pal,
 // across, TT medium 4; a TT high row is already a 1-bit PNG row.
 static void build_tt_row(unsigned mode, const uint16_t *w, uint8_t *out) {
   if (mode == TT_MODE_TT_HIGH) {
-    for (int i = 0; i < TT_HIGH_ROW_WORDS; i++) {
-      out[i * 2] = (uint8_t)(w[i] >> 8);
-      out[i * 2 + 1] = (uint8_t)(w[i] & 0xFF);
-    }
+    unpack_be(out, w, TT_HIGH_ROW_WORDS);
     return;
   }
   int planes = (mode == TT_MODE_TT_LOW) ? 8 : 4;
@@ -288,7 +298,7 @@ void screenshot_init(const char *folder) {
   streamSeq = 0;
   beginReceived = false;
   readyFlag = false;
-  unsupportedFlag = false;
+  pendingResult = RESULT_NONE;
   write_stream_ack(0, 0);
 }
 
@@ -317,13 +327,8 @@ void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
       if (idx >= SHOT_NUM_CHUNKS) {
         break;
       }
-      // Each payload word is a big-endian ST screen word; unpack to bytes.
-      uint8_t *dst = source + idx * SHOT_CHUNK_SIZE;
-      const uint16_t *w = p + PW_BUF;
-      for (int i = 0; i < SHOT_CHUNK_SIZE / 2; i++) {
-        dst[i * 2] = (uint8_t)(w[i] >> 8);
-        dst[i * 2 + 1] = (uint8_t)(w[i] & 0xFF);
-      }
+      unpack_be(source + idx * SHOT_CHUNK_SIZE, p + PW_BUF,
+                SHOT_CHUNK_SIZE / 2);
       chunksMask |= (uint16_t)(1u << idx);
       if (chunksMask == 0xFFFF) {
         readyFlag = true;  // all 16 chunks in
@@ -334,7 +339,7 @@ void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
       streamSeq = (uint16_t)p[PW_D3];
       begin_shot(p[PW_D4], payload32(p, PW_D5), p + PW_BUF,
                  TT_STREAM_FRAME_SIZE, TT_STREAM_FRAME_COUNT);
-      if (beginReceived || unsupportedFlag) {
+      if (beginReceived || pendingResult == SCREENSHOT_UNSUPPORTED) {
         write_stream_ack(streamSeq, 0);  // unsupported: the m68k stops here
       }
       DPRINTF("Screenshot STREAM BEGIN: seq=%u rez=%lu mch=0x%08lX\n",
@@ -356,12 +361,8 @@ void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
       if (seq != streamSeq || idx >= SHOT_STREAM_FRAME_COUNT) {
         break;
       }
-      uint8_t *dst = source + idx * SHOT_STREAM_FRAME_SIZE;
-      const uint16_t *w = p + PW_BUF;
-      for (int i = 0; i < SHOT_STREAM_FRAME_SIZE / 2; i++) {
-        dst[i * 2] = (uint8_t)(w[i] >> 8);
-        dst[i * 2 + 1] = (uint8_t)(w[i] & 0xFF);
-      }
+      unpack_be(source + idx * SHOT_STREAM_FRAME_SIZE, p + PW_BUF,
+                SHOT_STREAM_FRAME_SIZE / 2);
       streamFrameMask |= (uint64_t)1 << idx;
       write_stream_ack(seq, (uint16_t)(idx + 1));
       if (streamFrameMask == UINT64_MAX) {
@@ -536,12 +537,9 @@ static void find_next_index(void) {
     if (fno.fattrib & AM_DIR) {
       continue;
     }
-    unsigned n = 0;
-    if (sscanf(fno.fname, "snap_%u_", &n) == 1 ||
-        sscanf(fno.fname, "SNAP_%u_", &n) == 1) {
-      if (n > maxIdx) {
-        maxIdx = n;
-      }
+    unsigned n = screenshot_number(fno.fname);
+    if (n > maxIdx) {
+      maxIdx = n;
     }
   }
   f_closedir(&dir);
@@ -556,16 +554,16 @@ static void build_filename(char *path, size_t size, const char *suffix) {
 
 screenshot_result_t screenshot_writePending(void) {
   readyFlag = false;
-  if (unsupportedFlag) {
-    unsupportedFlag = false;
-    DPRINTF("Screenshot: a screen mode MD/Snap can't capture (mch=0x%08lX)\n",
-            (unsigned long)shotMch);
-    return SCREENSHOT_UNSUPPORTED;
-  }
-  if (streamDone) {
-    // A TT low/medium/high screen: already written as it arrived.
-    streamDone = false;
-    return streamOk ? SCREENSHOT_SAVED : SCREENSHOT_FAILED;
+  if (pendingResult != RESULT_NONE) {
+    // Already dealt with: a TT-mode screen written as it arrived, or one
+    // that can't be captured.
+    screenshot_result_t result = (screenshot_result_t)pendingResult;
+    pendingResult = RESULT_NONE;
+    if (result == SCREENSHOT_UNSUPPORTED) {
+      DPRINTF("Screenshot: a screen mode MD/Snap can't capture (mch=0x%08lX)\n",
+              (unsigned long)shotMch);
+    }
+    return result;
   }
   beginReceived = false;
 
@@ -594,9 +592,7 @@ screenshot_result_t screenshot_writePending(void) {
   f_close(&file);
 
   if (ok) {
-    DPRINTF("Screenshot written: %s\n", path);
-    strcpy(lastPath, path);
-    nextIndex++;
+    shot_saved(path);
   } else {
     DPRINTF("Screenshot: write error on %s\n", path);
   }
@@ -645,9 +641,7 @@ bool screenshot_captureLocal(void) {
   f_close(&file);
 
   if (ok) {
-    DPRINTF("Screenshot (menu) written: %s\n", path);
-    strcpy(lastPath, path);
-    nextIndex++;
+    shot_saved(path);
   } else {
     DPRINTF("Screenshot (menu): write error on %s\n", path);
   }
@@ -655,6 +649,17 @@ bool screenshot_captureLocal(void) {
 }
 
 const char *screenshot_lastPath(void) { return lastPath; }
+
+unsigned screenshot_number(const char *name) {
+  if (strncasecmp(name, "snap_", 5) != 0) {
+    return 0;
+  }
+  unsigned n = 0;
+  for (const char *p = name + 5; *p >= '0' && *p <= '9'; p++) {
+    n = n * 10 + (unsigned)(*p - '0');
+  }
+  return n;
+}
 
 void screenshot_cardChanged(void) { nextIndexValid = false; }
 

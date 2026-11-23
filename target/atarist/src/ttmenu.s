@@ -34,6 +34,8 @@
 
 	section text
 
+	xref read_cookie				; userfw.s
+
 ; Shared region (must match main.s and rp/src/preview_overlay.c).
 ROM4_ADDR			equ $FA0000
 FRAMEBUFFER_ADDR	equ (ROM4_ADDR + $10000 - 8000)	; the RP's 320x200 menu
@@ -45,7 +47,6 @@ TT_PREVIEW_DATA		equ (PREVIEW_FLAG + 2 + 512)	; 144x180, 8 interleaved planes
 DISPLAY_BYPASS_FRAMEBUFFER	equ 1					; as main.s: swap framebuffer bytes
 
 ; Hardware and TOS.
-_p_cookies			equ $5a0
 TT_SHIFTER_MODE		equ $FFFF8262	; mode in bits 8-10
 TT_PALETTE			equ $FFFF8400	; 256 colour words, 0RGB
 XBIOS_SETSCREEN		equ 5
@@ -91,18 +92,12 @@ ttmenu:
 ; was switched off, for TTMENU_EXIT to put back.
 ; Supervisor (reads the cookie jar); uses d0-d2/a0-a2 like XBIOS.
 ttmenu_rez:
-	move.l	_p_cookies.w, d0
-	beq.s	.not_tt
-	movea.l	d0, a0
-.find_vdo:
-	move.l	(a0)+, d0
-	beq.s	.not_tt					; end of the jar
-	cmp.l	#'_VDO', d0
-	beq.s	.found_vdo
-	addq.l	#4, a0
-	bra.s	.find_vdo
-.found_vdo:
-	cmp.w	#2, (a0)				; $0002xxxx: a TT's video
+	move.l	#'_VDO', d2
+	; userfw.s: d0 = its value (0: none); uses d1/a0. Its label is an offset
+	; in the image (userfw.ld), unlike main.s's, which is assembled at ROM4.
+	jsr		(ROM4_ADDR + read_cookie)
+	swap	d0
+	cmp.w	#2, d0					; $0002xxxx: a TT's video
 	bne.s	.not_tt
 	move.l	a1, -(sp)				; the block, kept across XBIOS
 	bsr.s	speaker_off
@@ -313,18 +308,17 @@ draw_high:
 	endif
 	move.w	d0, d3
 	lsr.w	#8, d3					; the left byte
-	bsr.s	expand4
-	bsr.s	put4
+	bsr.s	expand4					; ...and put4
 	move.w	d0, d3
 	and.w	#$FF, d3				; the right byte
-	bsr.s	expand4
-	bsr.s	put4
+	bsr.s	expand4					; ...and put4
 	dbf		d1, .hword
 	lea		(3 * TT_HIGH_ROW)(a1), a1	; past the four lines
 	dbf		d2, .hrow
 	rts
 
-; d3 = a byte (0-255) -> d4 = its pixels, each four wide. Uses d5/d6.
+; d3 = a byte (0-255) -> d4 = its pixels, each four wide, then on into put4.
+; Uses d5/d6.
 expand4:
 	add.w	d3, d3
 	move.w	(a3, d3.w), d5			; each pixel two wide
@@ -336,7 +330,7 @@ expand4:
 	and.w	#$FF, d5
 	add.w	d5, d5
 	move.w	(a3, d5.w), d4
-	rts
+	; on into put4
 
 ; d4 into four lines at a1, then a1 to the next long.
 put4:

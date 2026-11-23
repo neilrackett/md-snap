@@ -128,6 +128,8 @@ ETV_ABORT_TICKS	equ 200			; 200 * 20 ms = 4 seconds
 ; The write transport lives in main.s (ROM). Imported so the resident RAM copy
 ; can call it via an absolute-address jsr.
 	xref send_sync_write_command_to_sidecart
+; ttmenu.s finds a TT with read_cookie (its ROM copy: it only reads).
+	xdef read_cookie
 
 ; -----------------------------------------------------------------------
 ; Installer -- runs from ROM at USERFW ($FA0800). Only writes to RAM.
@@ -135,7 +137,7 @@ ETV_ABORT_TICKS	equ 200			; 200 * 20 ms = 4 seconds
 ; snapshot buffer size) survive the traps.
 ; -----------------------------------------------------------------------
 userfw:
-	movem.l	d0-d3/a0-a3, -(sp)
+	movem.l	d0-d4/a0-a3, -(sp)
 
 	; Allocate the resident block + the trailing screen snapshot buffer + the
 	; palette buffer. A TT needs room for its 153600-byte screens and 256-colour
@@ -144,6 +146,7 @@ userfw:
 	; test patterns over the resident handler, which the next VBL then runs
 	; (11 bombs: the patterns run as line-F instructions).
 	bsr		read_mch				; d0 = _MCH (runs from ROM: reads only)
+	move.l	d0, d4					; for res_mch (traps keep d3-d7)
 	swap	d0
 	cmp.w	#MCH_TT, d0
 	beq.s	.uf_alloc_tt
@@ -172,6 +175,9 @@ userfw:
 .uf_copy:
 	move.b	(a0)+, (a1)+
 	dbf		d1, .uf_copy
+
+	; The machine never changes: snapshot reads it from here.
+	move.l	d4, (res_mch-resident_start)(a3)
 
 	; The snapshot buffer sits right after the copied block, and the palette
 	; buffer right after that; store their addresses into the block so the
@@ -223,7 +229,7 @@ userfw:
 	move.w	(sp)+, sr
 
 .uf_exit:
-	movem.l	(sp)+, d0-d3/a0-a3
+	movem.l	(sp)+, d0-d4/a0-a3
 	rts
 
 ; -----------------------------------------------------------------------
@@ -283,10 +289,9 @@ resident_start:
 ; Also sets the sizes the send paths use for this capture: screen bytes,
 ; palette bytes, and the VBL chunk / ETV frame size and count.
 snapshot:
-	; Machine type from the _MCH cookie (high word: 0=ST, 1=STE, 2=TT...).
-	bsr		read_mch				; -> d0
-	lea		res_mch(pc), a0
-	move.l	d0, (a0)
+	; Machine type from the _MCH cookie (high word: 0=ST, 1=STE, 2=TT...),
+	; read by the installer.
+	move.l	res_mch(pc), d0
 	swap	d0
 	cmp.w	#MCH_TT, d0
 	beq.s	.snap_tt

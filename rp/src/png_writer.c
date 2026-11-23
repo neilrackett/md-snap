@@ -17,14 +17,23 @@
 
 #define PNG_STORED_BLOCK_MAX 0xFFFF  // max literal bytes per stored DEFLATE block
 
-// --- CRC32 (bitwise, no table) ------------------------------------------
+#define ADLER_MOD 65521u
+#define ADLER_NMAX 5552  // bytes before the Adler32 sums need reducing
+
+// --- CRC32, a nibble at a time (a 64-byte table) --------------------------
+// TT screens are written from inside the command callback, so this is on the
+// ST's critical path: about 4x quicker than bit by bit.
+static const uint32_t crc_nibble[16] = {
+    0x00000000u, 0x1DB71064u, 0x3B6E20C8u, 0x26D930ACu,
+    0x76DC4190u, 0x6B6B51F4u, 0x4DB26158u, 0x5005713Cu,
+    0xEDB88320u, 0xF00F9344u, 0xD6D6A3E8u, 0xCB61B38Cu,
+    0x9B64C2B0u, 0x86D3D2D4u, 0xA00AE278u, 0xBDBDF21Cu};
+
 static uint32_t crc32_update(uint32_t crc, const uint8_t *data, uint32_t len) {
   for (uint32_t i = 0; i < len; i++) {
     crc ^= data[i];
-    for (int k = 0; k < 8; k++) {
-      uint32_t mask = -(crc & 1u);
-      crc = (crc >> 1) ^ (0xEDB88320u & mask);
-    }
+    crc = (crc >> 4) ^ crc_nibble[crc & 15];
+    crc = (crc >> 4) ^ crc_nibble[crc & 15];
   }
   return crc;
 }
@@ -46,8 +55,15 @@ static void png_flush(png_writer_t *pw) {
 // Emit IDAT data bytes: staged for f_write and folded into the IDAT CRC.
 static void png_emit(png_writer_t *pw, const uint8_t *data, uint32_t len) {
   pw->crc = crc32_update(pw->crc, data, len);
-  for (uint32_t i = 0; i < len; i++) {
-    pw->buf[pw->buf_len++] = data[i];
+  while (len > 0) {
+    uint32_t k = sizeof(pw->buf) - pw->buf_len;
+    if (k > len) {
+      k = len;
+    }
+    memcpy(&pw->buf[pw->buf_len], data, k);
+    pw->buf_len += (uint16_t)k;
+    data += k;
+    len -= k;
     if (pw->buf_len == sizeof(pw->buf)) {
       png_flush(pw);
     }
@@ -150,40 +166,53 @@ bool png_writer_begin(png_writer_t *pw, FIL *f, uint16_t width, uint16_t height,
   return !pw->error;
 }
 
-// Emit one uncompressed (raw) image byte through the stored-block machinery,
-// folding it into Adler32 along the way.
-static void png_emit_raw_byte(png_writer_t *pw, uint8_t byte) {
-  if (pw->block_remaining == 0) {
-    uint32_t blen = pw->raw_remaining;
-    if (blen > PNG_STORED_BLOCK_MAX) {
-      blen = PNG_STORED_BLOCK_MAX;
+// Emit uncompressed image bytes through the stored-block machinery, folding
+// them into Adler32 along the way.
+static void png_emit_raw(png_writer_t *pw, const uint8_t *data, uint32_t len) {
+  while (len > 0) {
+    if (pw->block_remaining == 0) {
+      uint32_t blen = pw->raw_remaining;
+      if (blen > PNG_STORED_BLOCK_MAX) {
+        blen = PNG_STORED_BLOCK_MAX;
+      }
+      uint8_t bhdr[5];
+      bhdr[0] = (pw->raw_remaining <= PNG_STORED_BLOCK_MAX) ? 1 : 0;  // BFINAL
+      bhdr[1] = (uint8_t)(blen & 0xFF);
+      bhdr[2] = (uint8_t)(blen >> 8);
+      bhdr[3] = (uint8_t)(~blen & 0xFF);
+      bhdr[4] = (uint8_t)((~blen >> 8) & 0xFF);
+      png_emit(pw, bhdr, 5);
+      pw->block_remaining = blen;
     }
-    uint8_t bhdr[5];
-    bhdr[0] = (pw->raw_remaining <= PNG_STORED_BLOCK_MAX) ? 1 : 0;  // BFINAL
-    bhdr[1] = (uint8_t)(blen & 0xFF);
-    bhdr[2] = (uint8_t)(blen >> 8);
-    bhdr[3] = (uint8_t)(~blen & 0xFF);
-    bhdr[4] = (uint8_t)((~blen >> 8) & 0xFF);
-    png_emit(pw, bhdr, 5);
-    pw->block_remaining = blen;
-  }
-  png_emit(pw, &byte, 1);
-  pw->block_remaining--;
-  pw->raw_remaining--;
+    uint32_t k = pw->block_remaining < len ? pw->block_remaining : len;
+    if (k > ADLER_NMAX) {
+      k = ADLER_NMAX;  // the sums can't overflow before they are reduced
+    }
+    png_emit(pw, data, k);
+    pw->block_remaining -= k;
+    pw->raw_remaining -= k;
 
-  // Adler32 over the raw (uncompressed) data.
-  pw->adler_a = (pw->adler_a + byte) % 65521u;
-  pw->adler_b = (pw->adler_b + pw->adler_a) % 65521u;
+    // Adler32 over the raw (uncompressed) data, reduced once per run.
+    uint32_t a = pw->adler_a;
+    uint32_t b = pw->adler_b;
+    for (uint32_t i = 0; i < k; i++) {
+      a += data[i];
+      b += a;
+    }
+    pw->adler_a = a % ADLER_MOD;
+    pw->adler_b = b % ADLER_MOD;
+    data += k;
+    len -= k;
+  }
 }
 
 bool png_writer_row(png_writer_t *pw, const uint8_t *indices, uint16_t len) {
   if (pw->error) {
     return false;
   }
-  png_emit_raw_byte(pw, 0);  // PNG filter type 0 (None)
-  for (uint16_t i = 0; i < len; i++) {
-    png_emit_raw_byte(pw, indices[i]);
-  }
+  static const uint8_t filter = 0;  // PNG filter type 0 (None)
+  png_emit_raw(pw, &filter, 1);
+  png_emit_raw(pw, indices, len);
   return !pw->error;
 }
 

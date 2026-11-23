@@ -2,6 +2,8 @@
 # Copyright (C) 2026 Neil Rackett
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# Stop at the first command that fails.
+set -eo pipefail
 
 # Get the absolute path of the current script
 SCRIPT_DIR=$(dirname "$(realpath "$0")") 

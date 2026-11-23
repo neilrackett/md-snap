@@ -64,9 +64,12 @@
 #define SNAP_AUTOEXIT_ARM_DELAY_MS 6000
 #define SNAP_AUTOEXIT_SECONDS 10
 
-static char shotNames[MENU_MAX_SHOTS][MENU_NAME_LEN];
-static uint32_t shotSizes[MENU_MAX_SHOTS];   // for the preview cache's check
-static uint32_t shotStamps[MENU_MAX_SHOTS];
+typedef struct {
+  char name[MENU_NAME_LEN];
+  uint32_t size;   // size and time: for the preview cache's check
+  uint32_t stamp;
+} Shot;
+static Shot shots[MENU_MAX_SHOTS];
 static int shotCount = 0;
 static int currentPage = 0;
 static int selectedIndex = 0;
@@ -167,40 +170,20 @@ static bool isScreenshotName(const char *name) {
          (e[2] == 'N' || e[2] == 'n') && (e[3] == 'G' || e[3] == 'g');
 }
 
-// The NNNN of "snap_NNNN_...", the order they were taken in.
-static unsigned shotNumber(const char *name) {
-  unsigned n = 0;
-  for (const char *p = name + 5; *p >= '0' && *p <= '9'; p++) {
-    n = n * 10 + (unsigned)(*p - '0');
-  }
-  return n;
-}
-
-static void swapShots(int a, int b) {
-  char name[MENU_NAME_LEN];
-  memcpy(name, shotNames[a], MENU_NAME_LEN);
-  memcpy(shotNames[a], shotNames[b], MENU_NAME_LEN);
-  memcpy(shotNames[b], name, MENU_NAME_LEN);
-  uint32_t t = shotSizes[a];
-  shotSizes[a] = shotSizes[b];
-  shotSizes[b] = t;
-  t = shotStamps[a];
-  shotStamps[a] = shotStamps[b];
-  shotStamps[b] = t;
-}
-
 // Newest first: by number, highest first (not as text, so snap_10000 comes
 // before snap_9999), then by name. An insertion sort: the folder is mostly
 // in the order they were written, so mostly the reverse of this.
 static void sortShots(void) {
   for (int i = 1; i < shotCount; i++) {
     for (int j = i; j > 0; j--) {
-      unsigned a = shotNumber(shotNames[j - 1]);
-      unsigned b = shotNumber(shotNames[j]);
-      if (a > b || (a == b && strcmp(shotNames[j - 1], shotNames[j]) <= 0)) {
+      unsigned a = screenshot_number(shots[j - 1].name);
+      unsigned b = screenshot_number(shots[j].name);
+      if (a > b || (a == b && strcmp(shots[j - 1].name, shots[j].name) <= 0)) {
         break;
       }
-      swapShots(j - 1, j);
+      Shot t = shots[j - 1];
+      shots[j - 1] = shots[j];
+      shots[j] = t;
     }
   }
 }
@@ -215,10 +198,11 @@ static void scanShots(void) {
          shotCount < MENU_MAX_SHOTS) {
     if (fno.fattrib & AM_DIR) continue;
     if (!isScreenshotName(fno.fname)) continue;
-    strncpy(shotNames[shotCount], fno.fname, MENU_NAME_LEN - 1);
-    shotNames[shotCount][MENU_NAME_LEN - 1] = '\0';
-    shotSizes[shotCount] = (uint32_t)fno.fsize;
-    shotStamps[shotCount] = preview_overlay_stamp(fno.fdate, fno.ftime);
+    Shot *shot = &shots[shotCount];
+    strncpy(shot->name, fno.fname, MENU_NAME_LEN - 1);
+    shot->name[MENU_NAME_LEN - 1] = '\0';
+    shot->size = (uint32_t)fno.fsize;
+    shot->stamp = preview_overlay_stamp(fno.fdate, fno.ftime);
     shotCount++;
   }
   f_closedir(&dir);
@@ -319,8 +303,8 @@ static void syncPreviewOverlay(void) {
   }
 
   previewOverlayActive = preview_overlay_show(
-      SCREENSHOT_FOLDER, shotNames[selectedIndex], menuTtLow,
-      shotSizes[selectedIndex], shotStamps[selectedIndex]);
+      SCREENSHOT_FOLDER, shots[selectedIndex].name, menuTtLow,
+      shots[selectedIndex].size, shots[selectedIndex].stamp);
   previewOverlayIndex = selectedIndex;
 }
 
@@ -385,9 +369,9 @@ static void renderMenu(void) {
         char row[TERM_SCREEN_SIZE_X + 1];
         if (n == selectedIndex) {
           snprintf(row, sizeof(row), "\x1B" "p" " %-20.20s " "\x1B" "q",
-                   shotNames[n]);
+                   shots[n].name);
         } else {
-          snprintf(row, sizeof(row), " %-20.20s ", shotNames[n]);
+          snprintf(row, sizeof(row), " %-20.20s ", shots[n].name);
         }
         menuAt(MENU_LIST_TOP_ROW + i, 0, row);
       }
@@ -508,42 +492,23 @@ static bool menuKeyCb(char ascii, uint8_t scanCode, uint8_t shift) {
 }
 
 // --- desktop / screenshot service ---------------------------------------
-static void flashLed(void) {
+static void flashTimes(int times, int onMs, int offMs) {
 #ifdef BLINK_H
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < times; i++) {
     blink_on();
-    sleep_ms(60);
+    sleep_ms(onMs);
     blink_off();
-    sleep_ms(60);
+    sleep_ms(offMs);
   }
 #endif
 }
 
-// SELECT with no SD card to save to: two long flashes, not the six short
-// ones of a screenshot saved.
-static void flashNoCard(void) {
-#ifdef BLINK_H
-  for (int i = 0; i < 2; i++) {
-    blink_on();
-    sleep_ms(400);
-    blink_off();
-    sleep_ms(300);
-  }
-#endif
-}
-
-// SELECT on a screen MD/Snap can't capture (one of a Falcon's own modes):
-// three long flashes.
-static void flashUnsupported(void) {
-#ifdef BLINK_H
-  for (int i = 0; i < 3; i++) {
-    blink_on();
-    sleep_ms(400);
-    blink_off();
-    sleep_ms(300);
-  }
-#endif
-}
+// The LED's answers to SELECT: six short flashes for a screenshot saved, two
+// long ones for no SD card to save it to, three long ones for a screen MD/Snap
+// can't capture (one of a Falcon's own modes).
+static void flashLed(void) { flashTimes(6, 60, 60); }
+static void flashNoCard(void) { flashTimes(2, 400, 300); }
+static void flashUnsupported(void) { flashTimes(3, 400, 300); }
 
 // Whether there is an SD card to save to, asked as SELECT is released (the
 // card has no detect switch). One taken out is left for FatFs to start
@@ -651,12 +616,12 @@ static void exitToDesktop(void) {
         DPRINTF("SELECT long-press -> Booster\n");
         gotoBooster();  // does not return
       }
-    } else if (!pressed && wasPressed) {
-      if (!longFired && !sdCardReady()) {
+    } else if (!pressed && wasPressed && !longFired) {
+      if (!sdCardReady()) {
         // Nowhere to save it: don't have the ST send the screen at all.
         DPRINTF("SELECT -> no SD card\n");
         flashNoCard();
-      } else if (!longFired) {
+      } else {
         captureSeq++;
         SET_SHARED_VAR(5, 0, romBase, CHANDLER_SHARED_VARIABLES_OFFSET);
         SET_SHARED_VAR(3, captureSeq, romBase, CHANDLER_SHARED_VARIABLES_OFFSET);
@@ -837,11 +802,11 @@ void emul_start() {
         DPRINTF("Menu SELECT long-press -> Booster\n");
         gotoBooster();  // does not return
       }
-    } else if (!pressed && selPressed) {
-      if (!selLong && !sdCardReady()) {
+    } else if (!pressed && selPressed && !selLong) {
+      if (!sdCardReady()) {
         DPRINTF("Menu SELECT -> no SD card\n");
         flashNoCard();
-      } else if (!selLong) {
+      } else {
         DPRINTF("Menu SELECT -> capture menu\n");
         if (screenshot_captureLocal()) {
           flashLed();

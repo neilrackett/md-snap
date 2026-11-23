@@ -1,4 +1,6 @@
 #!/bin/bash
+# Stop at the first command that fails.
+set -eo pipefail
 
 # Down to main path
 cd ..
@@ -90,16 +92,16 @@ echo "Building the project"
 cd build
 # Legacy option to honor BUILD_TYPE instead of forcing MinSizeRel:
 # cmake ../src -DCMAKE_BUILD_TYPE=$BUILD_TYPE
-cmake ../src -DCMAKE_BUILD_TYPE=MinSizeRel || exit 1
+cmake ../src -DCMAKE_BUILD_TYPE=MinSizeRel
 
-make -j4 || exit 1
+make -j4
 
 # Copy the built firmware to the /dist folder
 cd ..
 mkdir -p dist
 echo "Copying the built firmware to the dist folder"
 if [ "$BUILD_TYPE" = "release" ]; then
-    cp build/rp.uf2 dist/rp-$BOARD_TYPE.uf2 || exit 1
+    cp build/rp.uf2 dist/rp-$BOARD_TYPE.uf2
 else
-    cp build/rp.uf2 dist/rp-$BOARD_TYPE-$BUILD_TYPE.uf2 || exit 1
+    cp build/rp.uf2 dist/rp-$BOARD_TYPE-$BUILD_TYPE.uf2
 fi

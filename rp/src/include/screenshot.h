@@ -76,6 +76,12 @@ bool screenshot_captureLocal(void);
 const char *screenshot_lastPath(void);
 
 /**
+ * @brief The NNNN of a "snap_NNNN_..." name (any case), the order screenshots
+ *        are taken in; 0 for any other name.
+ */
+unsigned screenshot_number(const char *name);
+
+/**
  * @brief The menu preview a machine like the one the last screen came from
  *        shows: 1 TT low (a TT), 0 ST low, -1 none (ST high or TT high, so a
  *        mono monitor).

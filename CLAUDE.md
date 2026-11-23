@@ -189,14 +189,13 @@ timer-C-driven hook safe** (this is the lightweight-handler discipline md-devops
 - `DPRINTF` is gated on `_DEBUG` and compiled out of release builds, so leaving diagnostic prints in is
   free. Several are deliberately kept (`Screenshot BEGIN/written`, `SELECT -> capture request`, menu
   trace) — handy for the next hardware iteration.
-- **The build stops at the first failing step**, and `make` fails with it: the m68k build (e.g. a
-  `bne.s` out of range), `firmware.py`, copying `target_firmware.h`, cmake, the RP make. It used to carry
-  on, so a failed m68k build quietly shipped the *previous* cartridge in the RP firmware.
-- **`firmware.py` requires the zero-trimmed image to be an EVEN number of bytes.** Because it zero-trims,
-  the *last non-zero byte* in the cartridge image must sit at an odd offset (→ even length). A stray
-  non-zero data byte near the end at an even offset (e.g. giving a resident state field a non-zero
-  default) makes the trim odd-length → `firmware.py` raises `ValueError` and the build stops. Keep
-  trailing resident-block data zero (let the installer set it at runtime).
+- **The build stops at the first failing step**, and `make` fails with it (`set -eo pipefail` in
+  `build.sh` and `rp/build.sh`, and explicit checks in `target/atarist/build.sh`): the m68k build (e.g. a
+  `bne.s` out of range), `firmware.py`, cmake, the RP make. It used to carry on, so a failed m68k build
+  quietly shipped the *previous* cartridge in the RP firmware.
+- `firmware.py` zero-trims the cartridge image and, when that leaves an odd length, puts one zero byte
+  back (it emits words). It used to raise `ValueError` instead, so trailing resident data had to stay
+  zero; that no longer matters.
 
 ## Build
 

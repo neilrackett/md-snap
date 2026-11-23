@@ -28,9 +28,9 @@ def binary_to_c_array(input_source, output_file, array_name, endian_format="litt
     else:
         trimmed_data = data[: last_non_zero_index + 1]
 
-    # Ensure that the trimmed binary data has an even length (since we're handling words)
+    # Whole words: an odd length gets back the zero byte the trim took off.
     if len(trimmed_data) % 2 != 0:
-        raise ValueError("The binary file size (after trimming zeros) should be an even number of bytes for word processing.")
+        trimmed_data += b'\x00'
 
     # Prepare the output content
     content = f"const uint16_t {array_name}[] = {{\n"
