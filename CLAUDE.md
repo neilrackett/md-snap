@@ -51,8 +51,21 @@ reverse-video added to `term.c`/`display_term.c` and the SELECT escape hatch in 
   144x180 8-plane preview and a 256-word TT palette (`preview_overlay.c`, `forTtLow`; entries 0/255 are
   kept white/black for the menu text); TT high draws it 4x (1280x800, 80-line borders), no preview.
   A screenshot of fewer than 256 colours is box-filtered into the TT preview (dithers show as the colour
-  they make): pass 1 counts the 12-bit averages in `tally[4096]` (8 KB), the 254 most used become the
-  palette and the rest map to the nearest, pass 2 draws. 256-colour ones stay pixel-for-pixel.
+  they make): one pass over the PNG counts the 12-bit averages in `tally[4096]` (8 KB) and keeps each
+  thumbnail pixel's colour packed 12-bit *in the preview block itself* (38880 B, where the planes then go:
+  row r's planes end before row r+1's packed colours), then the 254 most used become the palette, the rest
+  map to the nearest, and the kept colours are drawn. 256-colour ones stay pixel-for-pixel.
+- **Previews are cached on the SD card** (`/screenshots/.preview/<name>.tt` or `.st`, hidden): a 20-byte
+  header (magic, `PREVIEW_CACHE_VERSION`, variant, the PNG's size and FAT date/time from `scanShots`, a
+  checksum of the block) and then the preview block from the palette on, exactly as in memory, read
+  straight back in one `f_read`. One is used only if the checksum matches and, for a TT, palette entries
+  0/255 are still white/black: version 1 files written by the build whose heap overran into the region
+  (below) blacked out the whole TT menu when their screenshot was highlighted.
+  Decoding means reading the whole 256-307 KB PNG at 12.5 MHz SPI (~0.3-0.6 s); a cached one is ~26 KB.
+  The desktop loop makes the preview straight after each capture (`preview_overlay_prepare`, TT variant
+  from a TT, none for ST high/TT high, i.e. a mono monitor) and `preview_overlay_forget`s any kept for a
+  PNG of the same name first. **Bump `PREVIEW_CACHE_VERSION` whenever what a preview looks like changes.**
+  `Preview <name>: kept|made, N us` in the debug log times each one.
   The menu code relocates to 4 KB *below* the screen, so the 153600-byte TT screen doesn't reach it.
   Offsets past +32767 need `adda.l`, not a `lea` displacement (68000).
   `TTMENU_REZ` also switches the **TT's internal speaker off** for the menu (YM port A bit 6 set, via
@@ -70,8 +83,34 @@ reverse-video added to `term.c`/`display_term.c` and the SELECT escape hatch in 
   callback**, before the reply token/credit goes out; that is the backpressure. `chandler` has a single
   pending slot, so chunks must arrive in order: repeats are skipped, a gap drops the capture. TT high is
   written as a 1-bit PNG. The installer `Mxalloc`s the 154 KB snapshot buffer preferring TT-RAM.
+- **The RP heap must stop at 0x20030000.** `__StackLimit` in `rp/src/memmap_rp.ld` is the heap's ceiling
+  (`_sbrk`); it used to be the end of `ROM_IN_RAM`, so a heap that grew past RAM wrote into the cartridge
+  window: the ST's code, the command sentinel at `$FA2000`, the menu. It showed as **4 bombs** when the
+  preview was turned on, after 7.5 KB more `.bss` left the heap less room (settings and FatFs's LFN buffers
+  malloc, in 4 KB `sbrk` steps). It is now `ORIGIN(RAM) + LENGTH(RAM)`: a malloc that does not fit fails.
+  Keep big buffers out of `.bss` where the shared region has room: the preview's 4 KB PNG read buffer sits
+  in it, after the blend's packed colours and before the framebuffer (`IDAT_BUF_OFFSET`).
+- **The menu lists newest first:** `sortShots` orders by the number in `snap_NNNN_`, highest first (as a
+  number, so snap_10000 comes before snap_9999); a screenshot of the menu is selected once taken.
+- **Unsupported screens (a Falcon's own modes):** on a Falcon (`_MCH` $0003xxxx) `falcon_rez` in
+  `userfw.s` works out the mode from the Videl as Hatari's `videl.c` does: depth from `$FF8266` bits 10/8/4
+  (1/16/8 bits) else the ST shifter, width from `$FF8210`, height from `VDE - VDB` (`$FF82AA/$FF82A8`,
+  halved unless interlaced, halved again when doubled, `$FF82C2`), `$FF820E` 0, mono monitor (`$FF8006`
+  bits 6-7 = 0) 640x400 only. Only 320x200x4, 640x200x2 and 640x400x1 (within 8 lines) are ST low/med/
+  high; anything else sends just the BEGIN with rez `$FFFF` (`REZ_UNSUPPORTED` / `SHOT_REZ_UNSUPPORTED`)
+  and no chunks or frames (ETV stops at the begin-ack). The RP saves nothing and `screenshot_writePending`
+  returns `SCREENSHOT_UNSUPPORTED`: three long LED flashes. A Falcon-native 320x200 16-colour mode (RGB)
+  passes as ST low, but its colours may come from the Falcon palette, which isn't read. Checked in Hatari
+  with EmuTOS and an AUTO program calling `VsetMode` for each mode.
+- **SD card taken out:** there is no card-detect pin, so `sdcard_isPresent()` (`sdcard.c`) asks the
+  card (`sd_test_com`: CMD13, or a light init once it is marked uninitialised; MISO is pulled up, so a
+  missing card answers $FF at once). `sdCardReady()` in `emul.c` runs it as SELECT is released: no card →
+  two long LED flashes and the ST is **not** asked for the screen; a card back (or another) is mounted
+  again with `sdcard_initFilesystem` and `screenshot_cardChanged()` rescans for the next free number.
+  A write that fails anyway also gets the two long flashes. EmuMD replaces `sdcard.c`, so `emu/standins.c`
+  has a stand-in: `-O nocard=FROM[-TO]` (emulated ms) takes the card out for a while.
 - **No RTC / no wall clock:** the RP has no battery clock and we don't fetch NTP. Filenames are
-  sequential `snap_NNNN_<low|medium|high>.png` (RP scans the folder for the next free index). Do not
+  sequential `snap_NNNN_<low|med|high|tt_low|tt_med|tt_high|menu>.png` (RP scans the folder for the next free index). Do not
   reintroduce timestamped names without a real time source.
 - **Palette decode is ST-vs-STE:** the grabber sends the `_MCH` cookie value; the RP picks 3-bit (ST)
   or 4-bit-with-reordered-LSB (STE) decoding.
@@ -127,6 +166,10 @@ timer-C-driven hook safe** (this is the lightweight-handler discipline md-devops
   territory.
 
 ### Build tooling changes vs the stock template
+- The credit `boot_gem` prints (as MD/Net's: `MD/Snap <version> (c)2026 Neil Rackett` / `GPLv3
+  neilrackett.com/atarist`) is `target/atarist/src/version.inc`, written by `target/atarist/build.sh` on the
+  host from the root `version.txt` (stcmd's container sees only `target/atarist`, whose own `version.txt`
+  is stale). It has no terminator and must not be padded: it runs straight into `bg_msg`'s SELECT line.
 
 - `build.sh` calls `tools/bump_version.sh` (auto-increments the patch version in `version.txt` and
   syncs `rp/`+`target/` on every build) instead of plain `cp version.txt`. Set `SKIP_VERSION_BUMP=1`
@@ -139,13 +182,14 @@ timer-C-driven hook safe** (this is the lightweight-handler discipline md-devops
 - `DPRINTF` is gated on `_DEBUG` and compiled out of release builds, so leaving diagnostic prints in is
   free. Several are deliberately kept (`Screenshot BEGIN/written`, `SELECT -> capture request`, menu
   trace) — handy for the next hardware iteration.
-- **`firmware.py` requires the zero-trimmed image to be an EVEN number of bytes, and `build.sh` does
-  NOT abort if it fails.** Because it zero-trims, the *last non-zero byte* in the cartridge image must
-  sit at an odd offset (→ even length). A stray non-zero data byte near the end at an even offset (e.g.
-  giving a resident state field a non-zero default) makes the trim odd-length → `firmware.py` raises
-  `ValueError` → `target_firmware.h` is **silently left stale** and the RP build ships the *previous*
-  cartridge. Watch for `target_firmware.h generated successfully!` in the build log; keep trailing
-  resident-block data zero (let the installer set it at runtime).
+- **The build stops at the first failing step**, and `make` fails with it: the m68k build (e.g. a
+  `bne.s` out of range), `firmware.py`, copying `target_firmware.h`, cmake, the RP make. It used to carry
+  on, so a failed m68k build quietly shipped the *previous* cartridge in the RP firmware.
+- **`firmware.py` requires the zero-trimmed image to be an EVEN number of bytes.** Because it zero-trims,
+  the *last non-zero byte* in the cartridge image must sit at an odd offset (→ even length). A stray
+  non-zero data byte near the end at an even offset (e.g. giving a resident state field a non-zero
+  default) makes the trim odd-length → `firmware.py` raises `ValueError` and the build stops. Keep
+  trailing resident-block data zero (let the installer set it at runtime).
 
 ## Build
 

@@ -44,6 +44,9 @@
 // RP has free, so they are written to the PNG row by row as they arrive; every
 // chunk/frame is a whole number of rows. Must match target/atarist/src/userfw.s.
 #define MCH_TT 2
+// The "rez" the grabber sends for a screen it can't capture (one of a
+// Falcon's own modes), with no screen after it (userfw.s REZ_UNSUPPORTED).
+#define SHOT_REZ_UNSUPPORTED 0xFFFF
 #define TT_PALETTE_SIZE 256
 #define TT_MODE_ST_MED 1
 #define TT_MODE_ST_HIGH 2
@@ -78,6 +81,7 @@ static uint64_t streamFrameMask;  // bit i set once async stream frame i arrived
 static uint16_t streamSeq;
 static bool beginReceived;
 static volatile bool readyFlag;
+static volatile bool unsupportedFlag;  // the pending "screen" can't be captured
 
 // A TT low/medium/high screen going straight into its PNG.
 static bool streaming;        // the PNG is open and rows are being written
@@ -92,6 +96,7 @@ static uint32_t streamChunkSize;
 static uint8_t ttRow[TT_OUT_ROW_BYTES];
 
 static char destFolder[64] = "/screenshots";
+static char lastPath[96];  // the PNG written last
 static bool nextIndexValid;
 static unsigned nextIndex = 1;
 
@@ -142,6 +147,7 @@ static void stream_finish(void) {
   beginReceived = false;
   if (ok) {
     DPRINTF("Screenshot written: %s\n", streamPath);
+    strcpy(lastPath, streamPath);
     nextIndex++;
   } else {
     DPRINTF("Screenshot: write error on %s\n", streamPath);
@@ -182,6 +188,17 @@ static void stream_open(uint32_t chunkSize, uint32_t count) {
 // screen opens its PNG now.
 static void begin_shot(uint32_t rez, uint32_t mch, const uint16_t *pal,
                        uint32_t chunkSize, uint32_t count) {
+  if (rez == SHOT_REZ_UNSUPPORTED) {
+    if (streaming) {
+      stream_abort();
+    }
+    shotRez = rez;
+    shotMch = mch;
+    beginReceived = false;
+    unsupportedFlag = true;
+    readyFlag = true;
+    return;
+  }
   size_t palBytes = ((mch >> 16) == MCH_TT ? TT_PALETTE_SIZE : 16) * 2;
   // The m68k resends a BEGIN whose reply was slow (opening the PNG can be);
   // that repeat must not restart the stream it opened.
@@ -271,6 +288,7 @@ void screenshot_init(const char *folder) {
   streamSeq = 0;
   beginReceived = false;
   readyFlag = false;
+  unsupportedFlag = false;
   write_stream_ack(0, 0);
 }
 
@@ -316,8 +334,8 @@ void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
       streamSeq = (uint16_t)p[PW_D3];
       begin_shot(p[PW_D4], payload32(p, PW_D5), p + PW_BUF,
                  TT_STREAM_FRAME_SIZE, TT_STREAM_FRAME_COUNT);
-      if (beginReceived) {
-        write_stream_ack(streamSeq, 0);
+      if (beginReceived || unsupportedFlag) {
+        write_stream_ack(streamSeq, 0);  // unsupported: the m68k stops here
       }
       DPRINTF("Screenshot STREAM BEGIN: seq=%u rez=%lu mch=0x%08lX\n",
               streamSeq, (unsigned long)shotRez, (unsigned long)shotMch);
@@ -488,11 +506,11 @@ static const char *rez_name(void) {
     case 0:
       return "low";
     case 1:
-      return "medium";
+      return "med";
     case TT_MODE_TT_LOW:
       return "tt_low";
     case TT_MODE_TT_MED:
-      return "tt_medium";
+      return "tt_med";
     case TT_MODE_TT_HIGH:
       return "tt_high";
     default:
@@ -536,12 +554,18 @@ static void build_filename(char *path, size_t size, const char *suffix) {
   snprintf(path, size, "%s/snap_%04u_%s.png", destFolder, nextIndex, suffix);
 }
 
-bool screenshot_writePending(void) {
+screenshot_result_t screenshot_writePending(void) {
   readyFlag = false;
+  if (unsupportedFlag) {
+    unsupportedFlag = false;
+    DPRINTF("Screenshot: a screen mode MD/Snap can't capture (mch=0x%08lX)\n",
+            (unsigned long)shotMch);
+    return SCREENSHOT_UNSUPPORTED;
+  }
   if (streamDone) {
     // A TT low/medium/high screen: already written as it arrived.
     streamDone = false;
-    return streamOk;
+    return streamOk ? SCREENSHOT_SAVED : SCREENSHOT_FAILED;
   }
   beginReceived = false;
 
@@ -553,7 +577,7 @@ bool screenshot_writePending(void) {
   FIL file;
   if (f_open(&file, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
     DPRINTF("Screenshot: failed to open %s\n", path);
-    return false;
+    return SCREENSHOT_FAILED;
   }
 
   png_writer_t pw;
@@ -571,11 +595,12 @@ bool screenshot_writePending(void) {
 
   if (ok) {
     DPRINTF("Screenshot written: %s\n", path);
+    strcpy(lastPath, path);
     nextIndex++;
   } else {
     DPRINTF("Screenshot: write error on %s\n", path);
   }
-  return ok;
+  return ok ? SCREENSHOT_SAVED : SCREENSHOT_FAILED;
 }
 
 bool screenshot_captureLocal(void) {
@@ -621,9 +646,22 @@ bool screenshot_captureLocal(void) {
 
   if (ok) {
     DPRINTF("Screenshot (menu) written: %s\n", path);
+    strcpy(lastPath, path);
     nextIndex++;
   } else {
     DPRINTF("Screenshot (menu): write error on %s\n", path);
   }
   return ok;
+}
+
+const char *screenshot_lastPath(void) { return lastPath; }
+
+void screenshot_cardChanged(void) { nextIndexValid = false; }
+
+int screenshot_lastPreviewKind(void) {
+  unsigned mode = shot_mode();
+  if (mode == TT_MODE_ST_HIGH || mode == TT_MODE_TT_HIGH) {
+    return -1;  // a mono monitor: its menu has no preview
+  }
+  return shot_is_tt() ? 1 : 0;
 }

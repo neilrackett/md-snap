@@ -76,6 +76,19 @@ TT_PALETTE			equ $FFFF8400	; TT only: 256 colour words, 0RGB
 TT_MODE_TT_MED		equ 4			; TT modes 4 (med), 6 (high), 7 (low) are
 									; the 153600-byte ones; 0-2 are ST modes
 MCH_TT				equ 2			; _MCH high word for a TT
+MCH_FALCON			equ 3			; _MCH high word for a Falcon
+; A Falcon's Videl (falcon_rez).
+FALCON_MONITOR		equ $FFFF8006	; bits 6-7: 0 = mono (SM124)
+VIDEL_LINE_OFFSET	equ $FFFF820E	; words skipped after each line
+VIDEL_LINE_WIDTH	equ $FFFF8210	; words per line
+FALCON_SHIFT		equ $FFFF8266	; bit 10: 1 bit, 8: 16 bits, 4: 8 bits
+VIDEL_VDB			equ $FFFF82A8	; vertical display begin (half lines)
+VIDEL_VDE			equ $FFFF82AA	; vertical display end
+VIDEL_VCO			equ $FFFF82C2	; bit 0: lines doubled, bit 1: interlaced
+; Sent as the "rez" of a screen MD/Snap can't capture (one of a Falcon's own
+; modes): the RP saves nothing and flashes the LED to say so. No machine's
+; mode reads as this (screenshot.c SHOT_REZ_UNSUPPORTED).
+REZ_UNSUPPORTED		equ $FFFF
 CPU_68030			equ 30			; _CPU cookie value for a 68030 (TT, Falcon)
 CACR_ED				equ 8			; 68030 CACR: enable data cache
 CACR_CD				equ 11			; 68030 CACR: clear data cache
@@ -274,11 +287,19 @@ snapshot:
 	swap	d0
 	cmp.w	#MCH_TT, d0
 	beq.s	.snap_tt
+	cmp.w	#MCH_FALCON, d0
+	bne.s	.snap_st_rez
+	bsr		falcon_rez				; d0 = ST mode 0-2, or -1: the Falcon's own
+	tst.w	d0
+	bpl.s	.snap_rez
+	bra		snap_unsupported
 
+.snap_st_rez:
 	; Resolution (low 2 bits of the Shifter resolution register).
 	moveq	#0, d0
 	move.b	SHIFTER_REZ, d0
 	and.w	#3, d0
+.snap_rez:
 	lea		res_rez(pc), a0
 	move.l	d0, (a0)
 
@@ -357,6 +378,90 @@ snapshot:
 .snap_copy:
 	move.l	(a0)+, (a1)+
 	dbf		d1, .snap_copy
+	rts
+
+; A screen MD/Snap can't capture: only the BEGIN goes, saying so, and no
+; screen (no chunks, no frames). The palette size stays a real one, as the
+; transport sends that many bytes.
+snap_unsupported:
+	lea		res_rez(pc), a0
+	move.l	#REZ_UNSUPPORTED, (a0)
+	lea		res_palbytes(pc), a0
+	move.w	#SHOT_PAL_BYTES, (a0)+	; res_palbytes
+	clr.w	(a0)+					; res_chunk
+	clr.w	(a0)+					; res_nchunks
+	clr.w	(a0)+					; res_frame
+	clr.w	(a0)					; res_nframes
+	rts
+
+; --- The ST mode a Falcon's Videl is showing ------------------------------
+; d0 = 0, 1 or 2 when it is ST low, medium or high, as the Falcon shows them
+; for ST programs; -1 for one of its own modes (another size or depth),
+; which MD/Snap can't capture. The depth is as the Videl takes it: Falcon
+; shift mode bits 10 (1 bit), 8 (16 bits) and 4 (8 bits) first, else the ST
+; shifter's. The width is the line width; the height is VDE - VDB, in half
+; lines unless interlaced, halved again when lines are doubled (within 8
+; lines). A mono monitor shows only 640x400. Uses d0-d2.
+falcon_rez:
+	move.w	FALCON_SHIFT, d0
+	btst	#10, d0
+	bne.s	.fr_1bit
+	and.w	#$0110, d0
+	bne		.fr_no					; 8 or 16 bits
+	moveq	#0, d0
+	move.b	SHIFTER_REZ, d0
+	and.w	#3, d0
+	cmp.w	#2, d0
+	bhi		.fr_no
+	bra.s	.fr_size
+.fr_1bit:
+	moveq	#2, d0
+.fr_size:
+	move.w	VIDEL_LINE_OFFSET, d1
+	and.w	#$01FF, d1
+	bne		.fr_no					; a screen wider than shown
+	moveq	#80, d1					; words a line: 320x4, 640x2...
+	cmp.w	#2, d0
+	bne.s	.fr_width
+	moveq	#40, d1					; ...640x1
+.fr_width:
+	move.w	VIDEL_LINE_WIDTH, d2
+	and.w	#$03FF, d2
+	cmp.w	d1, d2
+	bne		.fr_no
+	move.b	FALCON_MONITOR, d1
+	and.b	#$C0, d1
+	beq.s	.fr_yes					; mono: 640x400
+	move.w	VIDEL_VDE, d1
+	and.w	#$07FF, d1
+	move.w	VIDEL_VDB, d2
+	and.w	#$07FF, d2
+	sub.w	d2, d1
+	bmi		.fr_no
+	move.w	VIDEL_VCO, d2
+	btst	#1, d2
+	bne.s	.fr_lines
+	lsr.w	#1, d1					; half lines -> lines
+.fr_lines:
+	btst	#0, d2
+	beq.s	.fr_height
+	lsr.w	#1, d1					; each line shown twice
+.fr_height:
+	move.w	#200, d2
+	cmp.w	#2, d0
+	bne.s	.fr_expect
+	move.w	#400, d2
+.fr_expect:
+	sub.w	d2, d1
+	bpl.s	.fr_near
+	neg.w	d1
+.fr_near:
+	cmp.w	#8, d1
+	bhi		.fr_no
+.fr_yes:
+	rts
+.fr_no:
+	moveq	#-1, d0
 	rts
 
 ; --- Read the _MCH cookie value into d0 (0 = assume plain ST) -----------
@@ -592,6 +697,8 @@ resident_etv_start:
 	clr.w	etv_frame-resident_etv_start(a5)
 	clr.w	etv_retry-resident_etv_start(a5)
 	clr.w	etv_timeout-resident_etv_start(a5)
+	move.w	res_nframes(pc), d0
+	beq		.etv_abort				; unsupported: the BEGIN was all
 	bra.s	.etv_send_frame_state	; credit for frame 0: send it this tick
 .etv_wait_begin_retry:
 	bsr		etv_wait_tick

@@ -1,5 +1,7 @@
 #include "sdcard.h"
 
+#include "diskio.h"
+
 static FATFS *mountedFsPtr = NULL;
 static bool sdMounted = false;
 
@@ -218,5 +220,25 @@ bool sdcard_getMountedInfo(uint32_t *totalSizeMb, uint32_t *freeSpaceMb) {
   uint64_t freeSpaceBytes =
       (uint64_t)freeClusters * fs->csize * NUM_BYTES_PER_SECTOR;
   *freeSpaceMb = (uint32_t)(freeSpaceBytes / SDCARD_MEGABYTE);
+  return true;
+}
+
+bool sdcard_isPresent(bool *fresh) {
+  *fresh = false;
+  sd_card_t *card = sd_get_by_num(0);
+  if ((card == NULL) || (card->sd_test_com == NULL)) {
+    return false;
+  }
+  // An answer from the card as it was started: still there.
+  if (card->sd_test_com(card) && !(card->state.m_Status & STA_NOINIT)) {
+    return true;
+  }
+  // Taken out, or another card put in (it does not answer until started).
+  // Either way it is now marked to be started afresh, and asking again
+  // starts just enough of a card to hear one.
+  if (!card->sd_test_com(card)) {
+    return false;
+  }
+  *fresh = true;
   return true;
 }

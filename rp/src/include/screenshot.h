@@ -48,13 +48,18 @@ void __not_in_flash_func(screenshot_command_cb)(TransmissionProtocol *protocol,
  */
 bool screenshot_pending(void);
 
+// What became of a screen (screenshot_writePending).
+typedef enum {
+  SCREENSHOT_SAVED,
+  SCREENSHOT_FAILED,       // not written (no SD card, or it is full)
+  SCREENSHOT_UNSUPPORTED,  // a mode MD/Snap can't capture: nothing was sent
+} screenshot_result_t;
+
 /**
  * @brief Decode the pending screen and write it as a PNG. Clears the pending
  *        flag. Call from the foreground loop (does blocking SD I/O).
- *
- * @return true if the PNG was written successfully.
  */
-bool screenshot_writePending(void);
+screenshot_result_t screenshot_writePending(void);
 
 /**
  * @brief Capture the RP's own 320x200 mono framebuffer (the MD/Snap menu)
@@ -64,5 +69,23 @@ bool screenshot_writePending(void);
  * @return true if the PNG was written successfully.
  */
 bool screenshot_captureLocal(void);
+
+/**
+ * @brief The path of the PNG written last ("" before the first).
+ */
+const char *screenshot_lastPath(void);
+
+/**
+ * @brief The menu preview a machine like the one the last screen came from
+ *        shows: 1 TT low (a TT), 0 ST low, -1 none (ST high or TT high, so a
+ *        mono monitor).
+ */
+int screenshot_lastPreviewKind(void);
+
+/**
+ * @brief The SD card has been mounted afresh (perhaps another card): find its
+ *        next free screenshot number again before the next file.
+ */
+void screenshot_cardChanged(void);
 
 #endif  // SCREENSHOT_H

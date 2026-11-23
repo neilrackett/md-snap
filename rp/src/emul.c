@@ -65,6 +65,8 @@
 #define SNAP_AUTOEXIT_SECONDS 10
 
 static char shotNames[MENU_MAX_SHOTS][MENU_NAME_LEN];
+static uint32_t shotSizes[MENU_MAX_SHOTS];   // for the preview cache's check
+static uint32_t shotStamps[MENU_MAX_SHOTS];
 static int shotCount = 0;
 static int currentPage = 0;
 static int selectedIndex = 0;
@@ -165,6 +167,44 @@ static bool isScreenshotName(const char *name) {
          (e[2] == 'N' || e[2] == 'n') && (e[3] == 'G' || e[3] == 'g');
 }
 
+// The NNNN of "snap_NNNN_...", the order they were taken in.
+static unsigned shotNumber(const char *name) {
+  unsigned n = 0;
+  for (const char *p = name + 5; *p >= '0' && *p <= '9'; p++) {
+    n = n * 10 + (unsigned)(*p - '0');
+  }
+  return n;
+}
+
+static void swapShots(int a, int b) {
+  char name[MENU_NAME_LEN];
+  memcpy(name, shotNames[a], MENU_NAME_LEN);
+  memcpy(shotNames[a], shotNames[b], MENU_NAME_LEN);
+  memcpy(shotNames[b], name, MENU_NAME_LEN);
+  uint32_t t = shotSizes[a];
+  shotSizes[a] = shotSizes[b];
+  shotSizes[b] = t;
+  t = shotStamps[a];
+  shotStamps[a] = shotStamps[b];
+  shotStamps[b] = t;
+}
+
+// Newest first: by number, highest first (not as text, so snap_10000 comes
+// before snap_9999), then by name. An insertion sort: the folder is mostly
+// in the order they were written, so mostly the reverse of this.
+static void sortShots(void) {
+  for (int i = 1; i < shotCount; i++) {
+    for (int j = i; j > 0; j--) {
+      unsigned a = shotNumber(shotNames[j - 1]);
+      unsigned b = shotNumber(shotNames[j]);
+      if (a > b || (a == b && strcmp(shotNames[j - 1], shotNames[j]) <= 0)) {
+        break;
+      }
+      swapShots(j - 1, j);
+    }
+  }
+}
+
 static void scanShots(void) {
   shotCount = 0;
   if (!sdReady) return;
@@ -177,9 +217,12 @@ static void scanShots(void) {
     if (!isScreenshotName(fno.fname)) continue;
     strncpy(shotNames[shotCount], fno.fname, MENU_NAME_LEN - 1);
     shotNames[shotCount][MENU_NAME_LEN - 1] = '\0';
+    shotSizes[shotCount] = (uint32_t)fno.fsize;
+    shotStamps[shotCount] = preview_overlay_stamp(fno.fdate, fno.ftime);
     shotCount++;
   }
   f_closedir(&dir);
+  sortShots();
 }
 
 static int totalPages(void) {
@@ -276,7 +319,8 @@ static void syncPreviewOverlay(void) {
   }
 
   previewOverlayActive = preview_overlay_show(
-      SCREENSHOT_FOLDER, shotNames[selectedIndex], menuTtLow);
+      SCREENSHOT_FOLDER, shotNames[selectedIndex], menuTtLow,
+      shotSizes[selectedIndex], shotStamps[selectedIndex]);
   previewOverlayIndex = selectedIndex;
 }
 
@@ -475,6 +519,52 @@ static void flashLed(void) {
 #endif
 }
 
+// SELECT with no SD card to save to: two long flashes, not the six short
+// ones of a screenshot saved.
+static void flashNoCard(void) {
+#ifdef BLINK_H
+  for (int i = 0; i < 2; i++) {
+    blink_on();
+    sleep_ms(400);
+    blink_off();
+    sleep_ms(300);
+  }
+#endif
+}
+
+// SELECT on a screen MD/Snap can't capture (one of a Falcon's own modes):
+// three long flashes.
+static void flashUnsupported(void) {
+#ifdef BLINK_H
+  for (int i = 0; i < 3; i++) {
+    blink_on();
+    sleep_ms(400);
+    blink_off();
+    sleep_ms(300);
+  }
+#endif
+}
+
+// Whether there is an SD card to save to, asked as SELECT is released (the
+// card has no detect switch). One taken out is left for FatFs to start
+// afresh, and one put back, or another, is mounted again with its folder.
+static bool sdCardReady(void) {
+  bool fresh = false;
+  if (!sdcard_isPresent(&fresh)) {
+    if (sdReady) {
+      DPRINTF("SD card: gone\n");
+    }
+    sdReady = false;
+    return false;
+  }
+  if (fresh || !sdReady) {
+    sdReady = sdcard_initFilesystem(&fsys, SCREENSHOT_FOLDER) == SDCARD_INIT_OK;
+    screenshot_cardChanged();
+    DPRINTF("SD card: mounted again (%s)\n", sdReady ? "ok" : "failed");
+  }
+  return sdReady;
+}
+
 // Hand control back to the Booster app. Two things have to happen, in order:
 //   1. Reset the m68k. Without this the ST keeps running our terminal print
 //      loop and just draws garbage over whatever Booster paints — the screen
@@ -531,9 +621,20 @@ static void exitToDesktop(void) {
     chandler_loop();
 
     if (screenshot_pending()) {
-      bool ok = screenshot_writePending();
-      if (ok) {
+      screenshot_result_t result = screenshot_writePending();
+      if (result == SCREENSHOT_UNSUPPORTED) {
+        flashUnsupported();
+      } else if (result == SCREENSHOT_FAILED) {
+        flashNoCard();  // taken out (or full) since SELECT was checked
+      } else {
         flashLed();
+        // Its preview now, while the ST carries on, so the menu shows it at
+        // once next time (and not one kept for a PNG of the same name).
+        preview_overlay_forget(screenshot_lastPath());
+        int kind = screenshot_lastPreviewKind();
+        if (kind >= 0) {
+          preview_overlay_prepare(screenshot_lastPath(), kind == 1);
+        }
       }
     }
 
@@ -551,7 +652,11 @@ static void exitToDesktop(void) {
         gotoBooster();  // does not return
       }
     } else if (!pressed && wasPressed) {
-      if (!longFired) {
+      if (!longFired && !sdCardReady()) {
+        // Nowhere to save it: don't have the ST send the screen at all.
+        DPRINTF("SELECT -> no SD card\n");
+        flashNoCard();
+      } else if (!longFired) {
         captureSeq++;
         SET_SHARED_VAR(5, 0, romBase, CHANDLER_SHARED_VARIABLES_OFFSET);
         SET_SHARED_VAR(3, captureSeq, romBase, CHANDLER_SHARED_VARIABLES_OFFSET);
@@ -733,14 +838,21 @@ void emul_start() {
         gotoBooster();  // does not return
       }
     } else if (!pressed && selPressed) {
-      if (!selLong) {
+      if (!selLong && !sdCardReady()) {
+        DPRINTF("Menu SELECT -> no SD card\n");
+        flashNoCard();
+      } else if (!selLong) {
         DPRINTF("Menu SELECT -> capture menu\n");
         if (screenshot_captureLocal()) {
           flashLed();
-          scanShots();   // pick up the just-written file...
-          clampSelection();
+          preview_overlay_forget(screenshot_lastPath());
+          scanShots();   // pick up the just-written file, now first...
+          selectedIndex = 0;
+          currentPage = 0;
           previewOverlayActive = false;
           renderMenu();  // ...and show it in the list
+        } else {
+          flashNoCard();
         }
       }
     }

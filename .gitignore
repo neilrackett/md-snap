@@ -61,3 +61,4 @@ dist/
 .claude/
 .DS_Store
 uuid.txt
+target/atarist/src/version.inc

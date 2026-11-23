@@ -123,6 +123,17 @@ void sdcard_getInfo(FATFS *fsPtr, uint32_t *totalSizeMb, uint32_t *freeSpaceMb);
 bool sdcard_isMounted(void);
 
 /**
+ * @brief Whether an SD card answers, asked over SPI (there is no card-detect
+ *        switch). A card that has stopped answering is marked for FatFs to
+ *        start afresh; asking again tries a card put back, or another.
+ *
+ * @param fresh set when the card answering has to be mounted again: it was
+ *              taken out and put back, or is another card
+ * @return true if a card answers.
+ */
+bool sdcard_isPresent(bool *fresh);
+
+/**
  * @brief Retrieves total and free SD card space from the mounted filesystem.
  *
  * @param totalSizeMb Output total size in MB.

@@ -535,7 +535,8 @@ boot_gem:
 	addq.l #6, sp
 	rts
 bg_msg:
-	dc.b 27,"E","Press SELECT to take a screenshot",13,10,13,10,0
+	include "version.inc"		; ESC E, the credit banner and a blank line
+	dc.b "Press SELECT to take a screenshot",13,10,13,10,0
 	even
 
 ; Dispatcher for the user firmware module. Reached on CMD_START via the

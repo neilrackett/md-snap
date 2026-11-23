@@ -8,7 +8,9 @@
  * Author: Neil Rackett
  * Copyright: 2026 - Neil Rackett
  * License: GPL v3
- * Description: Decode MD/Snap PNGs into a low-res ST planar preview overlay.
+ * Description: Decode MD/Snap PNGs into the menu's planar preview overlay,
+ * and keep each finished preview on the SD card so it can be shown again
+ * with one small read rather than by reading the whole PNG.
  */
 
 #include "preview_overlay.h"
@@ -16,15 +18,18 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "chandler.h"
 #include "constants.h"
+#include "debug.h"
 #include "ff.h"
 #include "memfunc.h"
 
 // MD/Snap writes 640x400 and 640x480 8-bit PNGs, and 1280x960 1-bit ones
 // (TT high), so a row is at most 1280 bytes.
 #define PNG_MAX_ROW_BYTES 1280
+#define PNG_MAX_WIDTH 1280
 #define PNG_MAX_COLORS 256
 #define PREVIEW_COLORS 16
 
@@ -36,7 +41,12 @@
 #define PREVIEW_PALETTE_OFFSET 2
 #define PREVIEW_DATA_OFFSET (PREVIEW_PALETTE_OFFSET + 32)
 
-#define IDAT_BUF_SIZE 512
+// The PNG is read this much at a time: whole sectors go straight from the
+// card into the buffer, several to a command. The buffer is in the shared
+// region, after the most the preview block uses (the blend's packed colours)
+// and before the menu's framebuffer: RP RAM is short, and its heap must not
+// reach the region (memmap_rp.ld).
+#define IDAT_BUF_SIZE 4096
 #define PREVIEW_BORDER_INDEX 15
 
 // On a TT the menu is in TT low (target/atarist/src/ttmenu.s, which must
@@ -49,14 +59,49 @@
 #define TT_PAPER 0
 #define TT_INK 255
 
+#define TT_PREVIEW_END \
+  (TT_PREVIEW_DATA_OFFSET + TT_PREVIEW_HEIGHT * TT_PREVIEW_ROW_BYTES)
+#define ST_PREVIEW_END \
+  (PREVIEW_DATA_OFFSET + PREVIEW_OVERLAY_HEIGHT * PREVIEW_ROW_BYTES)
+
+// The blend keeps each thumbnail pixel's 12-bit colour, packed two to three
+// bytes, where the preview's planes go, until the palette is chosen (see
+// blendImage). It must stay clear of the menu's framebuffer.
+#define TT_PACKED_ROW_BYTES (PREVIEW_OVERLAY_WIDTH * 3 / 2)
+#define IDAT_BUF_OFFSET                                         \
+  ((PREVIEW_BLOCK_OFFSET + TT_PREVIEW_DATA_OFFSET +              \
+    TT_PREVIEW_HEIGHT * TT_PACKED_ROW_BYTES + 3) & ~3)
+_Static_assert(IDAT_BUF_OFFSET + IDAT_BUF_SIZE <= CHANDLER_FRAMEBUFFER_OFFSET,
+               "the PNG read buffer would reach the framebuffer");
+
+// Finished previews, in a hidden folder beside the screenshots: a header,
+// then the preview block as it is in memory from the palette on (everything
+// but the flag). Checked against the PNG's size and time, and removed when a
+// new screenshot is given the PNG's name. Bump PREVIEW_CACHE_VERSION when
+// what is drawn changes, so old ones are made again.
+#define PREVIEW_CACHE_DIR ".preview"
+#define PREVIEW_CACHE_MAGIC 0x5053444Du  // "MDSP"
+#define PREVIEW_CACHE_VERSION 2  // 1: unchecked, and some made corrupt
+
+typedef struct {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t ttLow;
+  uint8_t reserved[2];
+  uint32_t pngSize;
+  uint32_t pngStamp;
+  uint32_t checksum;  // of the preview block that follows (cacheChecksum)
+} preview_cache_header_t;
+
 typedef struct {
   FIL *file;
-  uint32_t remaining;
-  uint8_t buf[IDAT_BUF_SIZE];
+  uint32_t remaining;  // IDAT bytes not yet read from the file
+  uint32_t blockLeft;  // bytes left in the current stored DEFLATE block
   UINT pos;
   UINT len;
 } idat_reader_t;
 
+#define idatBuf ((uint8_t *)((uintptr_t)&__rom_in_ram_start__ + IDAT_BUF_OFFSET))
 static uint8_t srcRow[PNG_MAX_ROW_BYTES];
 static uint8_t scaledRow[PREVIEW_OVERLAY_WIDTH];
 
@@ -130,51 +175,62 @@ static void writePalette(const uint8_t *plte, uint32_t plteLen) {
   }
 }
 
-static bool idatReadByte(idat_reader_t *reader, uint8_t *out) {
-  if (reader->pos >= reader->len) {
-    if (reader->remaining == 0) {
-      return false;
+// The next bytes of the IDAT chunk (its zlib stream).
+static bool idatRead(idat_reader_t *reader, uint8_t *out, uint32_t n) {
+  while (n > 0) {
+    if (reader->pos >= reader->len) {
+      if (reader->remaining == 0) {
+        return false;
+      }
+      UINT want = reader->remaining > IDAT_BUF_SIZE ? (UINT)IDAT_BUF_SIZE
+                                                    : (UINT)reader->remaining;
+      UINT br = 0;
+      if (f_read(reader->file, idatBuf, want, &br) != FR_OK || br == 0) {
+        return false;
+      }
+      reader->remaining -= br;
+      reader->pos = 0;
+      reader->len = br;
     }
-    UINT want = reader->remaining > sizeof(reader->buf)
-                    ? (UINT)sizeof(reader->buf)
-                    : (UINT)reader->remaining;
-    UINT br = 0;
-    if (f_read(reader->file, reader->buf, want, &br) != FR_OK || br == 0) {
-      return false;
+    uint32_t k = reader->len - reader->pos;
+    if (k > n) {
+      k = n;
     }
-    reader->remaining -= br;
-    reader->pos = 0;
-    reader->len = br;
+    memcpy(out, &idatBuf[reader->pos], k);
+    reader->pos += k;
+    out += k;
+    n -= k;
   }
-
-  *out = reader->buf[reader->pos++];
   return true;
 }
 
-static bool idatReadRawByte(idat_reader_t *reader, uint32_t *blockRemaining,
-                            uint8_t *out) {
-  if (*blockRemaining == 0) {
-    uint8_t hdr[5];
-    for (size_t i = 0; i < sizeof(hdr); i++) {
-      if (!idatReadByte(reader, &hdr[i])) {
+// The next bytes of the image data, across the stored DEFLATE blocks.
+static bool idatReadData(idat_reader_t *reader, uint8_t *out, uint32_t n) {
+  while (n > 0) {
+    if (reader->blockLeft == 0) {
+      uint8_t hdr[5];
+      if (!idatRead(reader, hdr, sizeof(hdr))) {
         return false;
       }
+      if ((hdr[0] & 0x06) != 0) {
+        return false;  // only stored DEFLATE blocks are supported
+      }
+      uint16_t len = (uint16_t)hdr[1] | ((uint16_t)hdr[2] << 8);
+      uint16_t nlen = (uint16_t)hdr[3] | ((uint16_t)hdr[4] << 8);
+      if ((uint16_t)~len != nlen) {
+        return false;
+      }
+      reader->blockLeft = len;
+      continue;
     }
-    if ((hdr[0] & 0x06) != 0) {
-      return false;  // only stored DEFLATE blocks are supported
-    }
-    uint16_t len = (uint16_t)hdr[1] | ((uint16_t)hdr[2] << 8);
-    uint16_t nlen = (uint16_t)hdr[3] | ((uint16_t)hdr[4] << 8);
-    if ((uint16_t)~len != nlen) {
+    uint32_t k = reader->blockLeft < n ? reader->blockLeft : n;
+    if (!idatRead(reader, out, k)) {
       return false;
     }
-    *blockRemaining = len;
+    reader->blockLeft -= k;
+    out += k;
+    n -= k;
   }
-
-  if (!idatReadByte(reader, out)) {
-    return false;
-  }
-  (*blockRemaining)--;
   return true;
 }
 
@@ -333,27 +389,20 @@ static void reducePalette(void) {
 // MD/Snap writes them).
 static bool idatOpen(idat_reader_t *reader, FIL *file, uint32_t idatLen) {
   *reader = (idat_reader_t){.file = file, .remaining = idatLen};
-  uint8_t z0 = 0;
-  uint8_t z1 = 0;
-  if (!idatReadByte(reader, &z0) || !idatReadByte(reader, &z1)) {
+  uint8_t zlib[2];
+  if (!idatRead(reader, zlib, sizeof(zlib))) {
     return false;
   }
-  return (z0 & 0x0F) == 8;
+  return (zlib[0] & 0x0F) == 8;
 }
 
 // The next image row into srcRow (filter type 0, as MD/Snap writes them).
-static bool idatNextRow(idat_reader_t *reader, uint32_t *blockRemaining) {
+static bool idatNextRow(idat_reader_t *reader) {
   uint8_t filter = 0;
-  if (!idatReadRawByte(reader, blockRemaining, &filter) || filter != 0) {
+  if (!idatReadData(reader, &filter, 1) || filter != 0) {
     return false;
   }
-  uint32_t rowBytes = (pngWidth * pngDepth + 7) / 8;
-  for (uint32_t x = 0; x < rowBytes; x++) {
-    if (!idatReadRawByte(reader, blockRemaining, &srcRow[x])) {
-      return false;
-    }
-  }
-  return true;
+  return idatReadData(reader, srcRow, (pngWidth * pngDepth + 7) / 8);
 }
 
 // Decode the IDAT stream into the thumbnail, a source pixel for each of its
@@ -365,11 +414,10 @@ static bool decodeIdat(FIL *file, uint32_t idatLen, bool countOnly) {
   }
 
   uint16_t height = ttLow ? TT_PREVIEW_HEIGHT : PREVIEW_OVERLAY_HEIGHT;
-  uint32_t blockRemaining = 0;
   uint16_t targetRow = 0;
   uint32_t nextSourceRow = 0;
-  for (uint32_t y = 0; y < pngHeight; y++) {
-    if (!idatNextRow(&reader, &blockRemaining)) {
+  for (uint32_t y = 0; y < pngHeight && targetRow < height; y++) {
+    if (!idatNextRow(&reader)) {
       return false;
     }
 
@@ -402,9 +450,9 @@ static bool decodeIdat(FIL *file, uint32_t idatLen, bool countOnly) {
 // each of its pixels is the average of the source pixels it covers, so a
 // dither shows as the colour it makes on screen rather than as whichever of
 // its pixels a sample lands on. The averages are rounded to the TT's 12-bit
-// colours; a first pass counts them, the 254 most used become the palette
-// (entries 0 and 255 stay white and black for the menu), the rest take the
-// nearest of those, and a second pass draws the thumbnail.
+// colours, counted and kept as the PNG is read (once); then the 254 most used
+// become the palette (entries 0 and 255 stay white and black for the menu),
+// the rest take the nearest of those, and the kept colours are drawn.
 #define TT_COLOURS 4096
 #define TT_CHOSEN 0x8000  // in tally[]: the colour's palette entry is in bits 0-7
 
@@ -414,6 +462,8 @@ static uint32_t sumG[PREVIEW_OVERLAY_WIDTH];
 static uint32_t sumB[PREVIEW_OVERLAY_WIDTH];
 static uint32_t sumN[PREVIEW_OVERLAY_WIDTH];
 
+static void chooseTtPalette(void);
+
 static uint32_t ttDistance(uint16_t a, uint16_t b) {
   int dr = (int)((a >> 8) & 15) - (int)((b >> 8) & 15);
   int dg = (int)((a >> 4) & 15) - (int)((b >> 4) & 15);
@@ -421,60 +471,100 @@ static uint32_t ttDistance(uint16_t a, uint16_t b) {
   return (uint32_t)(dr * dr + dg * dg + db * db);
 }
 
-// One thumbnail row from the sums: counted (draw false) or drawn.
-static void blendRow(uint16_t row, bool draw) {
-  for (uint16_t x = 0; x < PREVIEW_OVERLAY_WIDTH; x++) {
-    uint32_t n = sumN[x];
-    uint8_t rgb[3] = {(uint8_t)((sumR[x] + n / 2) / n),
-                      (uint8_t)((sumG[x] + n / 2) / n),
-                      (uint8_t)((sumB[x] + n / 2) / n)};
-    uint16_t c = rgbToTt(rgb);
-    if (draw) {
-      scaledRow[x] = (uint8_t)(tally[c] & 0xFF);
-    } else {
-      tally[c]++;
-    }
-    sumR[x] = sumG[x] = sumB[x] = sumN[x] = 0;
-  }
-  if (draw) {
-    writePlanarRow8(row, scaledRow);
-  }
+// Where the blend keeps a thumbnail row's colours until they are drawn.
+static uint8_t *packedRow(uint16_t row) {
+  return (uint8_t *)(overlayBase() + TT_PREVIEW_DATA_OFFSET) +
+         (uint32_t)row * TT_PACKED_ROW_BYTES;
 }
 
-static bool blendPass(FIL *file, uint32_t idatLen, bool draw) {
-  idat_reader_t reader;
-  if (!idatOpen(&reader, file, idatLen)) {
-    return false;
+// One thumbnail row from the sums: its colours counted and kept.
+static void blendRow(uint16_t row) {
+  uint8_t *packed = packedRow(row);
+  for (uint16_t x = 0; x < PREVIEW_OVERLAY_WIDTH; x += 2) {
+    uint16_t c[2];
+    for (int i = 0; i < 2; i++) {
+      uint32_t n = sumN[x + i];
+      uint8_t rgb[3] = {(uint8_t)((sumR[x + i] + n / 2) / n),
+                        (uint8_t)((sumG[x + i] + n / 2) / n),
+                        (uint8_t)((sumB[x + i] + n / 2) / n)};
+      c[i] = rgbToTt(rgb);
+      tally[c[i]]++;
+    }
+    *packed++ = (uint8_t)(c[0] >> 4);
+    *packed++ = (uint8_t)((c[0] << 4) | (c[1] >> 8));
+    *packed++ = (uint8_t)c[1];
   }
   memset(sumR, 0, sizeof(sumR));
   memset(sumG, 0, sizeof(sumG));
   memset(sumB, 0, sizeof(sumB));
   memset(sumN, 0, sizeof(sumN));
-  uint32_t blockRemaining = 0;
+}
+
+// Draw the kept colours with the palette chooseTtPalette gave them. Row r's
+// planes end at (r + 1) * 144, before row r + 1's colours at (r + 1) * 216,
+// so each row is drawn over colours already read.
+static void drawBlended(void) {
+  for (uint16_t row = 0; row < TT_PREVIEW_HEIGHT; row++) {
+    const uint8_t *packed = packedRow(row);
+    for (uint16_t x = 0; x < PREVIEW_OVERLAY_WIDTH; x += 2) {
+      uint16_t c0 = (uint16_t)((packed[0] << 4) | (packed[1] >> 4));
+      uint16_t c1 = (uint16_t)(((packed[1] & 15) << 8) | packed[2]);
+      packed += 3;
+      scaledRow[x] = (uint8_t)(tally[c0] & 0xFF);
+      scaledRow[x + 1] = (uint8_t)(tally[c1] & 0xFF);
+    }
+    writePlanarRow8(row, scaledRow);
+  }
+}
+
+static bool blendImage(FIL *file, uint32_t idatLen) {
+  idat_reader_t reader;
+  if (!idatOpen(&reader, file, idatLen)) {
+    return false;
+  }
+  memset(tally, 0, sizeof(tally));
+  memset(sumR, 0, sizeof(sumR));
+  memset(sumG, 0, sizeof(sumG));
+  memset(sumB, 0, sizeof(sumB));
+  memset(sumN, 0, sizeof(sumN));
   uint16_t rows = 0;
   for (uint32_t y = 0; y < pngHeight; y++) {
-    if (!idatNextRow(&reader, &blockRemaining)) {
+    if (!idatNextRow(&reader)) {
       return false;
     }
+    // Source pixel x goes into thumbnail column x * 144 / width, stepped
+    // rather than divided (the image is at least 144 wide).
+    uint32_t col = 0;
+    uint32_t step = 0;
     for (uint32_t x = 0; x < pngWidth; x++) {
-      uint32_t col = (x * PREVIEW_OVERLAY_WIDTH) / pngWidth;
-      const uint8_t *rgb = &pngPalette[rowPixel(x) * 3];
+      uint8_t idx = (pngDepth == 8) ? srcRow[x] : rowPixel(x);
+      const uint8_t *rgb = &pngPalette[idx * 3];
       sumR[col] += rgb[0];
       sumG[col] += rgb[1];
       sumB[col] += rgb[2];
       sumN[col]++;
+      step += PREVIEW_OVERLAY_WIDTH;
+      if (step >= pngWidth) {
+        step -= pngWidth;
+        col++;
+      }
     }
     // The last source row of a thumbnail row finishes it.
-    uint32_t row = (y * TT_PREVIEW_HEIGHT) / pngHeight;
-    if (y + 1 == pngHeight || ((y + 1) * TT_PREVIEW_HEIGHT) / pngHeight != row) {
-      blendRow((uint16_t)row, draw);
+    if (y + 1 == pngHeight || ((y + 1) * TT_PREVIEW_HEIGHT) / pngHeight !=
+                                  (y * TT_PREVIEW_HEIGHT) / pngHeight) {
+      blendRow(rows);
       rows++;
     }
   }
-  return rows == TT_PREVIEW_HEIGHT;
+  if (rows != TT_PREVIEW_HEIGHT) {
+    return false;
+  }
+  chooseTtPalette();
+  drawBlended();
+  return true;
 }
 
-// After the counting pass: give the most used colours palette entries 1-254,
+// After counting: give the most used colours palette entries 1-254,
 // map every other colour to its nearest, and write the palette.
 static void chooseTtPalette(void) {
   uint16_t pal[PNG_MAX_COLORS] = {0};
@@ -552,7 +642,8 @@ static bool decodePngToOverlay(FIL *file) {
       pngDepth = ihdr[8];
       if (pngWidth == 0 || pngHeight == 0 ||
           (pngDepth != 1 && pngDepth != 2 && pngDepth != 4 && pngDepth != 8) ||
-          (pngWidth * pngDepth + 7) / 8 > PNG_MAX_ROW_BYTES || ihdr[9] != 3 ||
+          (pngWidth * pngDepth + 7) / 8 > PNG_MAX_ROW_BYTES ||
+          pngWidth > PNG_MAX_WIDTH || ihdr[9] != 3 ||
           ihdr[10] != 0 || ihdr[11] != 0 || ihdr[12] != 0) {
         return false;
       }
@@ -580,15 +671,7 @@ static bool decodePngToOverlay(FIL *file) {
       if (ttLow) {
         if (plteCount < PNG_MAX_COLORS && pngWidth >= PREVIEW_OVERLAY_WIDTH &&
             pngHeight >= TT_PREVIEW_HEIGHT) {
-          // Blended: count, choose the palette, then draw.
-          FSIZE_t idatStart = f_tell(file);
-          memset(tally, 0, sizeof(tally));
-          if (!blendPass(file, len, false) ||
-              f_lseek(file, idatStart) != FR_OK) {
-            return false;
-          }
-          chooseTtPalette();
-          return blendPass(file, len, true);
+          return blendImage(file, len);
         }
         writeTtPalette();  // 256 colours: the image's own, pixel for pixel
         return decodeIdat(file, len, false);
@@ -619,8 +702,125 @@ static bool decodePngToOverlay(FIL *file) {
   }
 }
 
+static bool decodePng(const char *path) {
+  FIL file;
+  if (f_open(&file, path, FA_READ) != FR_OK) {
+    return false;
+  }
+  bool ok = decodePngToOverlay(&file);
+  f_close(&file);
+  return ok;
+}
+
+// The preview block from the palette on, as the cache keeps it.
+static uint8_t *cachedPart(void) { return (uint8_t *)(overlayBase() + 2); }
+
+static uint32_t cachedBytes(bool forTtLow) {
+  return (forTtLow ? TT_PREVIEW_END : ST_PREVIEW_END) - 2;
+}
+
+// "<folder>/.preview/<name without .png>.tt" (or .st) for a PNG's path.
+static bool cachePath(char *out, size_t size, const char *pngPath,
+                      bool forTtLow) {
+  const char *slash = strrchr(pngPath, '/');
+  if (slash == NULL) {
+    return false;
+  }
+  const char *name = slash + 1;
+  size_t nameLen = strlen(name);
+  if (nameLen > 4 && strcasecmp(name + nameLen - 4, ".png") == 0) {
+    nameLen -= 4;
+  }
+  int n = snprintf(out, size, "%.*s/" PREVIEW_CACHE_DIR "/%.*s.%s",
+                   (int)(slash - pngPath), pngPath, (int)nameLen, name,
+                   forTtLow ? "tt" : "st");
+  return n > 0 && n < (int)size;
+}
+
+static uint32_t cacheChecksum(uint32_t n) {
+  const uint16_t *w = (const uint16_t *)cachedPart();
+  uint32_t sum = 0;
+  for (uint32_t i = 0; i < n / 2; i++) {
+    sum = ((sum << 1) | (sum >> 31)) + w[i];
+  }
+  return sum;
+}
+
+// A kept preview is used only if it is whole and, on a TT, keeps the menu's
+// white paper and black ink (palette entries 0 and 255): one that did not
+// would black out the menu.
+static bool cachedLooksRight(bool forTtLow, uint32_t n, uint32_t checksum) {
+  if (cacheChecksum(n) != checksum) {
+    return false;
+  }
+  if (forTtLow) {
+    const uint16_t *pal = (const uint16_t *)cachedPart();
+    return pal[TT_PAPER] == 0x0FFF && pal[TT_INK] == 0x0000;
+  }
+  return true;
+}
+
+static bool cacheLoad(const char *pngPath, bool forTtLow, uint32_t pngSize,
+                      uint32_t pngStamp) {
+  char path[128];
+  if (!cachePath(path, sizeof(path), pngPath, forTtLow)) {
+    return false;
+  }
+  FIL file;
+  if (f_open(&file, path, FA_READ) != FR_OK) {
+    return false;
+  }
+  preview_cache_header_t hdr;
+  uint32_t n = cachedBytes(forTtLow);
+  bool ok = readExact(&file, &hdr, sizeof(hdr)) &&
+            hdr.magic == PREVIEW_CACHE_MAGIC &&
+            hdr.version == PREVIEW_CACHE_VERSION &&
+            hdr.ttLow == (forTtLow ? 1 : 0) && hdr.pngSize == pngSize &&
+            hdr.pngStamp == pngStamp && f_size(&file) == sizeof(hdr) + n &&
+            readExact(&file, cachedPart(), n) &&
+            cachedLooksRight(forTtLow, n, hdr.checksum);
+  f_close(&file);
+  return ok;
+}
+
+static void cacheSave(const char *pngPath, bool forTtLow, uint32_t pngSize,
+                      uint32_t pngStamp) {
+  char path[128];
+  if (!cachePath(path, sizeof(path), pngPath, forTtLow)) {
+    return;
+  }
+  // The folder first, hidden, if it is not there yet.
+  char *slash = strrchr(path, '/');
+  *slash = '\0';
+  if (f_mkdir(path) == FR_OK) {
+    f_chmod(path, AM_HID, AM_HID);
+  }
+  *slash = '/';
+
+  FIL file;
+  if (f_open(&file, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+    return;
+  }
+  preview_cache_header_t hdr = {.magic = PREVIEW_CACHE_MAGIC,
+                                .version = PREVIEW_CACHE_VERSION,
+                                .ttLow = forTtLow ? 1 : 0,
+                                .pngSize = pngSize,
+                                .pngStamp = pngStamp};
+  uint32_t n = cachedBytes(forTtLow);
+  hdr.checksum = cacheChecksum(n);
+  UINT bw1 = 0;
+  UINT bw2 = 0;
+  bool ok = f_write(&file, &hdr, sizeof(hdr), &bw1) == FR_OK &&
+            bw1 == sizeof(hdr) &&
+            f_write(&file, cachedPart(), n, &bw2) == FR_OK && bw2 == n;
+  ok = (f_close(&file) == FR_OK) && ok;
+  if (!ok) {
+    f_unlink(path);
+  }
+}
+
 bool preview_overlay_show(const char *folder, const char *filename,
-                          bool forTtLow) {
+                          bool forTtLow, uint32_t pngSize, uint32_t pngStamp) {
   preview_overlay_disable();
   ttLow = forTtLow;
 
@@ -630,17 +830,46 @@ bool preview_overlay_show(const char *folder, const char *filename,
     return false;
   }
 
-  FIL file;
-  if (f_open(&file, path, FA_READ) != FR_OK) {
-    return false;
+#if defined(_DEBUG) && (_DEBUG != 0)
+  absolute_time_t start = get_absolute_time();
+#endif
+  bool cached = cacheLoad(path, forTtLow, pngSize, pngStamp);
+  if (!cached) {
+    if (!decodePng(path)) {
+      preview_overlay_disable();
+      return false;
+    }
+    cacheSave(path, forTtLow, pngSize, pngStamp);
   }
-  bool ok = decodePngToOverlay(&file);
-  f_close(&file);
-  if (!ok) {
-    preview_overlay_disable();
-    return false;
-  }
+  DPRINTF("Preview %s: %s, %lld us\n", filename, cached ? "kept" : "made",
+          absolute_time_diff_us(start, get_absolute_time()));
 
   overlayWriteWord(PREVIEW_FLAG_OFFSET, 1);
   return true;
+}
+
+bool preview_overlay_prepare(const char *path, bool forTtLow) {
+  FILINFO fno;
+  if (f_stat(path, &fno) != FR_OK) {
+    return false;
+  }
+  preview_overlay_disable();
+  ttLow = forTtLow;
+  if (!decodePng(path)) {
+    preview_overlay_disable();
+    return false;
+  }
+  cacheSave(path, forTtLow, (uint32_t)fno.fsize,
+            preview_overlay_stamp(fno.fdate, fno.ftime));
+  DPRINTF("Preview %s: made for %s\n", path, forTtLow ? "TT low" : "ST low");
+  return true;
+}
+
+void preview_overlay_forget(const char *path) {
+  char cache[128];
+  for (int tt = 0; tt < 2; tt++) {
+    if (cachePath(cache, sizeof(cache), path, tt != 0)) {
+      f_unlink(cache);
+    }
+  }
 }

@@ -10,7 +10,7 @@ Microfirmware for the [SidecarTridge Multi-device](https://sidecartridge.com) by
 
 MD/Snap turns your SidecarTridge Multi-device into a screenshot button for your Atari ST: press **SELECT** on the SidecarT and the current screen is saved as a 640x400 PNG in the `/screenshots` folder on the SD card.
 
-When the app starts you'll see a list of the screenshots you've already taken. Press **ESC** to start using your ST as normal and from then on, every press of **SELECT** grabs the screen and flashes SidecarT's LED to let you know it's worked.
+When the app starts you'll see a list of the screenshots you've already taken. Press **ESC** to start using your ST as normal and from then on, every press of **SELECT** grabs the screen and flashes SidecarT's LED to let you know it's worked. If there's no SD card in the SidecarT, the LED gives two long flashes instead: put the card back and press SELECT again.
 
 It works in all ST resolutions (low, medium and high) and corrects the aspect ratio for you, so the saved 640×400 image looks like what you see on screen rather than squashed pixels.
 
@@ -34,6 +34,7 @@ You can choose between 2 screen capture modes:
 
 - Anything that replaces VBL, ETV or Timer C will block the screen grabber, so it may not work in all games.
 - It doesn't work for apps that bypass standard screen layout, for example overscan or sync-scrolling.
+- On a Falcon it captures ST low, medium and high, but not the Falcon's own modes (such as 640×480 or 256 colours): SELECT then gives three long flashes and saves nothing.
 
 ## Running it on your computer
 

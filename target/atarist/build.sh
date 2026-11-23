@@ -15,6 +15,14 @@ working_folder=$1
 build_type=$2
 target_firmware="target_firmware.h"
 
+# The credit banner boot_gem prints, as MD/Net's, with the version from the
+# repository's version.txt. Written here on the host: stcmd's container sees
+# only this folder. It leads straight into main.s's "Press SELECT" line, so it
+# has no terminator (and no padding, which would end the string early).
+version=$(cat "$working_folder/../../version.txt")
+printf 'banner_txt:\tdc.b 27,"E","MD/Snap %s (c)2026 Neil Rackett",13,10\n\tdc.b "GPLv3 neilrackett.com/atarist",13,10,13,10\n' \
+    "$version" > "$working_folder/src/version.inc"
+
 # ST_WORKING_FOLDER=$working_folder/configurator stcmd make $build_type
 # STCMD_NO_TTY=1 keeps docker working when invoked from non-TTY contexts
 # (CI, sub-shells, build wrappers). Without it stcmd's `-it` flag aborts
@@ -88,9 +96,15 @@ fi
 echo "File has been resized."
 
 echo "Creating the firmware.h file."
-python firmware.py --input=dist/FIRMWARE.IMG --output=$target_firmware --array_name=target_firmware
+if ! python firmware.py --input=dist/FIRMWARE.IMG --output=$target_firmware --array_name=target_firmware; then
+    echo "ERROR: firmware.py failed; rp/src/include/$target_firmware not updated"
+    exit 6
+fi
 
-cp $target_firmware ../../rp/src/include/$target_firmware
+if ! cp $target_firmware ../../rp/src/include/$target_firmware; then
+    echo "ERROR: could not copy $target_firmware to rp/src/include"
+    exit 7
+fi
 echo "Copied $target_firmware to rp/src/include/$target_firmware"
 
 rm $target_firmware

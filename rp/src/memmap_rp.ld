@@ -295,8 +295,11 @@ SECTIONS
 
 
 
-    /* stack limit is poorly named, but historically is maximum heap ptr */
-    __StackLimit = ORIGIN(RAM) + LENGTH(RAM) + LENGTH(ROM_IN_RAM);
+    /* stack limit is poorly named, but historically is maximum heap ptr.
+       The heap ends where RAM does: past it is ROM_IN_RAM, the ST's
+       cartridge (its code, the command sentinel, the menu), which a heap
+       grown into it overwrites. A malloc that does not fit fails instead. */
+    __StackLimit = ORIGIN(RAM) + LENGTH(RAM);
     __StackOneTop = ORIGIN(SCRATCH_X) + LENGTH(SCRATCH_X);
     __StackTop = ORIGIN(SCRATCH_Y) + LENGTH(SCRATCH_Y);
     __StackOneBottom = __StackOneTop - SIZEOF(.stack1_dummy);

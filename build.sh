@@ -40,14 +40,21 @@ mkdir dist
 # Build the project in the target architecture
 echo "Building target project"
 cd target/atarist
-./build.sh "$SCRIPT_DIR/target/atarist" release
+if ! ./build.sh "$SCRIPT_DIR/target/atarist" release; then
+    # Stop: going on would build the RP with the previous cartridge.
+    echo "ERROR: target build failed; stopping"
+    exit 1
+fi
 cd ../..
 echo "Done building target project"
 
 # Build the rp project in the RP architecture
 echo "Building rp project"
 cd rp
-./build.sh "$BOARD_TYPE" "$BUILD_TYPE"
+if ! ./build.sh "$BOARD_TYPE" "$BUILD_TYPE"; then
+    echo "ERROR: rp build failed; stopping"
+    exit 1
+fi
 if [ "$BUILD_TYPE" = "release" ]; then
     cp  ./dist/rp-$BOARD_TYPE.uf2 ../dist/rp.uf2
 else
